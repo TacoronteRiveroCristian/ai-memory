@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -15,6 +16,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
 from qdrant_client import AsyncQdrantClient
@@ -60,7 +62,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-mcp = FastMCP("AIMemoryBrain", streamable_http_path="/")
+mcp = FastMCP(
+    "AIMemoryBrain",
+    streamable_http_path="/",
+    # This instance is accessed from other machines on the LAN during testing,
+    # so localhost-only host validation would reject legitimate requests.
+    transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+)
+mcp_app = mcp.streamable_http_app()
 
 
 class MemoryCreateRequest(BaseModel):
@@ -1098,8 +1107,7 @@ async def api_reflection_status():
     return await get_reflection_status_payload()
 
 
-@app.on_event("startup")
-async def startup():
+async def initialize_app_state():
     global pg_pool, redis_client, openai_client, http_client
     logger.info("Iniciando AI Memory Brain")
     openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
@@ -1133,8 +1141,7 @@ async def startup():
             logger.warning("Mem0 no listo aun: %s", exc)
 
 
-@app.on_event("shutdown")
-async def shutdown():
+async def shutdown_app_state():
     if pg_pool:
         await pg_pool.close()
     if redis_client:
@@ -1145,7 +1152,19 @@ async def shutdown():
         await http_client.aclose()
 
 
-mcp_app = mcp.streamable_http_app()
+@asynccontextmanager
+async def app_lifespan(_: FastAPI):
+    await initialize_app_state()
+    try:
+        # Mounted sub-app lifespans are not entered automatically by FastAPI,
+        # so we must run FastMCP's session manager from the parent app.
+        async with mcp.session_manager.run():
+            yield
+    finally:
+        await shutdown_app_state()
+
+
+app.router.lifespan_context = app_lifespan
 app.mount("/mcp", mcp_app)
 
 

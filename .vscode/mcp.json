@@ -1,0 +1,19 @@
+{
+  "inputs": [
+    {
+      "type": "promptString",
+      "id": "memory-api-key",
+      "description": "AI Memory API key",
+      "password": true
+    }
+  ],
+  "servers": {
+    "memoryBrain": {
+      "type": "http",
+      "url": "http://localhost:8050/mcp",
+      "headers": {
+        "X-API-Key": "${input:memory-api-key}"
+      }
+    }
+  }
+}
