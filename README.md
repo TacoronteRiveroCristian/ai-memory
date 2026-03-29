@@ -22,3 +22,8 @@ docker compose ps
 ./scripts/health_check.sh
 ./scripts/backup.sh
 ```
+
+Documentación útil:
+
+- `docs/MCP_TOOLS.md`: qué hace cada tool MCP, cuándo usarla y cómo invocarla.
+- `docs/CEREBRO_CONSCIENTE_SUPERDOCS.md`: arquitectura completa y funcionamiento del sistema.

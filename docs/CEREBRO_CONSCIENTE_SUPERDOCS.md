@@ -626,6 +626,10 @@ Conciencia y reflexión:
 - `run_memory_reflection`
 - `get_reflection_status`
 
+Guía operativa detallada por tool:
+
+- `docs/MCP_TOOLS.md`
+
 ### 7.2 REST principales
 
 - `GET /health`

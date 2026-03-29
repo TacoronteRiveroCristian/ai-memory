@@ -587,6 +587,25 @@ async def store_memory(
     skip_similar: bool = False,
     dedupe_threshold: float = 0.92,
 ) -> str:
+    """Guarda una memoria explícita y reusable en la memoria semántica del proyecto.
+
+    Cuándo usar:
+    - Cuando un agente descubre un hecho, convención, hallazgo o resultado que
+      debe sobrevivir a la sesión actual.
+    - Para conocimiento durable; no para logs efímeros o pensamiento intermedio.
+
+    Cómo usar:
+    - `content` debe ser autocontenido y entendible fuera del contexto inmediato.
+    - `project` debe ser el nombre estable del proyecto al que pertenece.
+    - `memory_type` permite clasificar (`general`, `decision`, `error`, etc.).
+    - `tags` acepta una cadena CSV para mejorar filtrado y trazabilidad.
+    - `skip_similar=True` evita duplicados semánticos antes de escribir.
+
+    Devuelve:
+    - `OK ...` si la memoria se guardó.
+    - `SKIP ...` si se omitió por alta similitud con otra memoria existente.
+    - `ERROR ...` si ocurrió un fallo.
+    """
     try:
         await ensure_project(project)
         tags_list = normalize_tags(tags)
@@ -650,6 +669,24 @@ async def search_memory(
     memory_type: Optional[str] = None,
     limit: int = 8,
 ) -> str:
+    """Busca memorias por similitud semántica y devuelve un resumen legible.
+
+    Cuándo usar:
+    - Al arrancar una tarea o retomar contexto.
+    - Antes de tomar una decisión para revisar si ya existe conocimiento previo.
+    - Cuando se necesita recuperar errores, decisiones o notas relevantes.
+
+    Cómo usar:
+    - `query` debe escribirse en lenguaje natural con el contexto que buscas.
+    - Usa `project` para limitar la búsqueda a un proyecto concreto.
+    - Usa `memory_type` si solo quieres una categoría concreta.
+    - Ajusta `limit` para controlar el número máximo de resultados.
+
+    Devuelve:
+    - Una lista textual de memorias relevantes con score y extracto.
+    - Un mensaje informando que no hubo coincidencias.
+    - `ERROR ...` si la búsqueda falla.
+    """
     try:
         embedding = await get_embedding(query)
         conditions = []
@@ -686,6 +723,23 @@ async def search_memory(
 
 @mcp.tool()
 async def get_project_context(project_name: str, agent_id: Optional[str] = None) -> str:
+    """Construye una vista rápida del estado operativo y memorias de un proyecto.
+
+    Cuándo usar:
+    - Al inicio de una sesión de trabajo.
+    - Cuando un agente cambia de tarea o necesita rehidratar contexto.
+    - Antes de planificar trabajo nuevo o revisar lo pendiente.
+
+    Cómo usar:
+    - Pasa `project_name` con el nombre canónico del proyecto.
+    - `agent_id` es opcional y ayuda a recuperar working memory más específica.
+    - El resultado combina tareas activas, decisiones recientes, working memory
+      y una búsqueda semántica contextual.
+
+    Devuelve:
+    - Un bloque de texto estructurado con contexto operativo del proyecto.
+    - `ERROR ...` si no pudo construirse el contexto.
+    """
     try:
         output = [f"PROJECT {project_name}"]
         if agent_id:
@@ -756,6 +810,24 @@ async def update_task_state(
     details: str = "",
     agent_id: str = "unknown",
 ) -> str:
+    """Crea o actualiza el estado de una tarea compartida del proyecto.
+
+    Cuándo usar:
+    - Cuando una tarea pasa a `active`, `blocked`, `done` o `cancelled`.
+    - Para dejar trazabilidad compartida entre agentes sobre trabajo en curso.
+
+    Cómo usar:
+    - `task_title` debe ser estable para que el upsert actualice la misma tarea.
+    - `new_state` solo admite `pending`, `active`, `blocked`, `done` o
+      `cancelled`.
+    - `details` permite guardar contexto adicional útil.
+    - `agent_id` identifica quién actualizó la tarea.
+
+    Devuelve:
+    - `OK ...` si la tarea quedó registrada.
+    - `ERROR invalid_state` si el estado no es válido.
+    - `ERROR ...` ante fallos de persistencia.
+    """
     valid_states = {"pending", "active", "blocked", "done", "cancelled"}
     if new_state not in valid_states:
         return "ERROR invalid_state"
@@ -792,6 +864,22 @@ async def update_task_state(
 
 @mcp.tool()
 async def list_active_tasks(project: Optional[str] = None) -> str:
+    """Lista las tareas activas o no cerradas, globales o de un proyecto.
+
+    Cuándo usar:
+    - Antes de planificar el siguiente paso.
+    - Para coordinar varios agentes trabajando sobre el mismo proyecto.
+    - Para revisar qué quedó pendiente o bloqueado.
+
+    Cómo usar:
+    - Omite `project` para ver un resumen global.
+    - Indica `project` para limitar el listado a un proyecto concreto.
+
+    Devuelve:
+    - Una lista textual de tareas con proyecto, estado, prioridad y agente.
+    - `No active tasks` si no hay tareas abiertas.
+    - `ERROR ...` si la consulta falla.
+    """
     try:
         if not pg_pool:
             return "ERROR postgres_unavailable"
@@ -841,6 +929,22 @@ async def store_decision(
     tags: str = "",
     agent_id: str = "unknown",
 ) -> str:
+    """Registra una decisión importante y la promueve también a memoria semántica.
+
+    Cuándo usar:
+    - Cuando se elige una arquitectura, convención, política o criterio estable.
+    - Cuando una decisión debe poder recuperarse más adelante con su contexto.
+
+    Cómo usar:
+    - `title` debe nombrar la decisión de forma corta y estable.
+    - `decision` debe dejar claro qué se decidió.
+    - `rationale` y `alternatives` ayudan a entender por qué se tomó.
+    - `tags` y `agent_id` mejoran trazabilidad y recuperación posterior.
+
+    Devuelve:
+    - `OK ...` si la decisión quedó registrada.
+    - `ERROR ...` si falló la persistencia o la memoria derivada.
+    """
     try:
         if not pg_pool:
             return "ERROR postgres_unavailable"
@@ -884,6 +988,23 @@ async def store_error(
     error_signature: str = "",
     tags: str = "",
 ) -> str:
+    """Guarda un error conocido con su solución y aumenta su contador de ocurrencias.
+
+    Cuándo usar:
+    - Cuando ya entendiste el problema y tienes una solución o workaround útil.
+    - Para errores recurrentes que conviene reconocer rápidamente en el futuro.
+
+    Cómo usar:
+    - `error_description` debe describir el síntoma o contexto del fallo.
+    - `solution` debe explicar la corrección o mitigación aplicada.
+    - `error_signature` conviene usarlo como identificador estable del problema;
+      si se omite, se deriva del inicio de la descripción.
+    - `tags` ayuda a clasificar por stack, módulo o tipo de incidente.
+
+    Devuelve:
+    - `OK ...` si el error quedó registrado o actualizado.
+    - `ERROR ...` si hubo un problema de persistencia.
+    """
     try:
         if not pg_pool:
             return "ERROR postgres_unavailable"
@@ -938,6 +1059,27 @@ async def record_session_summary(
     follow_ups: Optional[list[dict[str, str]]] = None,
     tags: Optional[list[str]] = None,
 ) -> str:
+    """Cierra una sesión de trabajo con un resumen estructurado y reusable.
+
+    Cuándo usar:
+    - Al terminar un bloque significativo de trabajo.
+    - Cuando quieres dejar continuidad real para otro agente o para una sesión
+      futura.
+
+    Cómo usar:
+    - `session_id` debe ser único por sesión para evitar duplicados.
+    - `goal`, `outcome` y `summary` deben capturar intención, resultado y
+      contexto final.
+    - `changes`, `decisions`, `errors` y `follow_ups` permiten registrar
+      artefactos importantes en formato estructurado.
+    - `tags` sirve para agrupar la sesión por tema o área.
+
+    Devuelve:
+    - `OK ...` con checksum y estado de ingesta de working memory.
+    - `ERROR duplicate_session ...` si se intenta guardar dos veces la misma
+      sesión.
+    - `ERROR ...` ante cualquier otro fallo.
+    """
     try:
         payload = SessionSummaryRequest(
             project=project,
@@ -968,6 +1110,21 @@ async def record_session_summary(
 
 @mcp.tool()
 async def run_memory_reflection() -> str:
+    """Encola una reflexión manual para consolidar memoria desde sesiones previas.
+
+    Cuándo usar:
+    - Después de varias sesiones importantes.
+    - Cuando quieres forzar consolidación sin esperar al ciclo automático.
+    - Tras cambios relevantes que deberían promocionarse a memoria más estable.
+
+    Cómo usar:
+    - Llama la tool una sola vez por necesidad real de consolidación.
+    - Consulta luego `get_reflection_status` para seguir el estado del worker.
+
+    Devuelve:
+    - `OK ...` con `run_id` y estado de la ejecución encolada.
+    - `ERROR ...` si no pudo encolarse.
+    """
     try:
         result = await queue_manual_reflection()
         if result.get("error"):
@@ -980,6 +1137,20 @@ async def run_memory_reflection() -> str:
 
 @mcp.tool()
 async def get_reflection_status() -> str:
+    """Consulta el estado del worker de reflexión y de la última ejecución conocida.
+
+    Cuándo usar:
+    - Después de lanzar `run_memory_reflection`.
+    - Para monitorear si el worker está vivo y si la cola avanza correctamente.
+
+    Cómo usar:
+    - Invócala tal cual, sin parámetros.
+    - Interpreta la respuesta como JSON serializado.
+
+    Devuelve:
+    - Un JSON en texto con heartbeat del worker, última ejecución y readiness.
+    - `ERROR ...` si no puede obtenerse el estado.
+    """
     try:
         status = await get_reflection_status_payload()
         return json.dumps(status, ensure_ascii=False)
@@ -990,6 +1161,20 @@ async def get_reflection_status() -> str:
 
 @mcp.tool()
 async def delete_memory(memory_id: str) -> str:
+    """Elimina una memoria explícita por su identificador.
+
+    Cuándo usar:
+    - Para limpiar duplicados, recuerdos inválidos o datos cargados por error.
+    - Solo cuando estás seguro de que la memoria no debe seguir disponible.
+
+    Cómo usar:
+    - Pasa `memory_id` exacto de la memoria a eliminar.
+    - Úsala con cuidado: es una operación destructiva.
+
+    Devuelve:
+    - `OK ...` si la memoria fue eliminada.
+    - `ERROR ...` si la operación falla.
+    """
     try:
         await qdrant.delete(collection_name=COLLECTION_NAME, points_selector=[memory_id])
         return f"OK deleted={memory_id}"
