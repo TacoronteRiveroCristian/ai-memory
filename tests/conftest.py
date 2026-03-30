@@ -52,6 +52,10 @@ class BrainClient:
         params = {"project": project} if project else {}
         return self.get("/api/graph/metrics", params=params)
 
+    def graph_facets(self, project: Optional[str] = None):
+        params = {"project": project} if project else {}
+        return self.get("/api/graph/facets", params=params)
+
     def link_memories(self, **payload):
         return self.post("/api/relations", payload)
 

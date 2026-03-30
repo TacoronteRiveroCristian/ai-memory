@@ -98,6 +98,33 @@ export interface GraphMetrics {
   generated_at: string;
 }
 
+export interface GraphFacets {
+  project: string | null;
+  projects: Array<{
+    project: string;
+    memory_count: number;
+    pinned_memory_count: number;
+  }>;
+  memory_types: Array<{
+    memory_type: string;
+    count: number;
+  }>;
+  top_tags: Array<{
+    tag: string;
+    count: number;
+  }>;
+  hot_memories: Array<{
+    memory_id: string;
+    project: string | null;
+    memory_type: string | null;
+    content_preview: string;
+    tags: string[];
+    manual_pin: boolean;
+    prominence: number;
+  }>;
+  generated_at: string;
+}
+
 export interface GraphControlsState {
   project: string;
   mode: GraphMode;

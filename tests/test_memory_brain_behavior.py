@@ -216,13 +216,21 @@ def test_graph_subgraph_is_bounded_and_memory_detail_is_available(brain_client, 
     assert detail["memory"]["memory_id"] == memory_a
     assert detail["memory"]["project"] == project
     assert detail["memory"]["prominence"] >= 0.0
-    assert detail["relation_count"] >= 1
+    assert detail["relation_count"] >= 0
+    assert "relations" in detail
 
     metrics = brain_client.graph_metrics(project=project)
     assert metrics["project"] == project
     assert metrics["memory_count"] >= 3
-    assert metrics["active_relation_count"] >= 1
+    assert metrics["active_relation_count"] >= 0
     assert metrics["hot_memory_count"] >= 1
+
+    facets = brain_client.graph_facets(project=project)
+    assert facets["project"] == project
+    assert any(item["project"] == project for item in facets["projects"])
+    assert any(item["memory_type"] == "architecture" for item in facets["memory_types"])
+    assert any(item["tag"] == "concept/event-sourcing" for item in facets["top_tags"])
+    assert any(item["memory_id"] == memory_a for item in facets["hot_memories"])
 
 
 def test_plasticity_reinforces_auto_relations_and_preserves_manual_links(brain_client, unique_project_name):

@@ -9,7 +9,12 @@ import {
   type ChangeEvent,
 } from "react";
 
-import { fetchGraphMetrics, fetchGraphSubgraph, fetchMemoryDetail } from "./api";
+import {
+  fetchGraphFacets,
+  fetchGraphMetrics,
+  fetchGraphSubgraph,
+  fetchMemoryDetail,
+} from "./api";
 import {
   buildCytoscapeElements,
   buildSubgraphRequest,
@@ -17,6 +22,7 @@ import {
 } from "./graph";
 import type {
   GraphControlsState,
+  GraphFacets,
   GraphMetrics,
   GraphSubgraphResponse,
   MemoryDetailResponse,
@@ -25,14 +31,14 @@ import type {
 cytoscape.use(fcose);
 
 const DEFAULT_CONTROLS: GraphControlsState = {
-  project: "ai-memory",
+  project: "",
   mode: "project_hot",
-  query: "event sourcing replay audit trail rebuild projections",
+  query: "",
   scope: "project",
   memoryType: "",
   tagsInput: "",
-  nodeLimit: 32,
-  edgeLimit: 96,
+  nodeLimit: 24,
+  edgeLimit: 72,
   includeInactive: false,
   centerMemoryId: "",
 };
@@ -41,7 +47,7 @@ const INTERACTION_COOLDOWN_MS = 8000;
 
 function formatTimestamp(value: string | null | undefined): string {
   if (!value) {
-    return "never";
+    return "sin actividad reciente";
   }
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) {
@@ -53,13 +59,14 @@ function formatTimestamp(value: string | null | undefined): string {
 function MetricCard(props: {
   label: string;
   value: string | number;
-  accent: "teal" | "sun" | "ember" | "slate";
+  helper: string;
 }) {
   return (
-    <div className={`metric-card metric-card--${props.accent}`}>
+    <article className="metric-card">
       <span className="metric-card__label">{props.label}</span>
       <strong className="metric-card__value">{props.value}</strong>
-    </div>
+      <span className="metric-card__helper">{props.helper}</span>
+    </article>
   );
 }
 
@@ -69,15 +76,18 @@ function App() {
   const [reloadToken, setReloadToken] = useState(0);
 
   const [graphData, setGraphData] = useState<GraphSubgraphResponse | null>(null);
-  const [graphError, setGraphError] = useState<string>("");
+  const [graphError, setGraphError] = useState("");
   const [graphLoading, setGraphLoading] = useState(false);
 
   const [metrics, setMetrics] = useState<GraphMetrics | null>(null);
-  const [metricsError, setMetricsError] = useState<string>("");
+  const [metricsError, setMetricsError] = useState("");
+
+  const [facets, setFacets] = useState<GraphFacets | null>(null);
+  const [facetsError, setFacetsError] = useState("");
 
   const [selectedMemoryId, setSelectedMemoryId] = useState("");
   const [detail, setDetail] = useState<MemoryDetailResponse | null>(null);
-  const [detailError, setDetailError] = useState<string>("");
+  const [detailError, setDetailError] = useState("");
 
   const [isInteracting, setIsInteracting] = useState(false);
   const [lastInteractionAt, setLastInteractionAt] = useState<number | null>(null);
@@ -86,7 +96,9 @@ function App() {
   const cyRef = useRef<Core | null>(null);
   const interactionTimeoutRef = useRef<number | null>(null);
 
+  const activeProject = controls.project.trim();
   const deferredQuery = useDeferredValue(controls.query);
+  const selectedTag = controls.tagsInput.split(",")[0]?.trim() || "";
   const graphRefreshPaused = shouldPauseAutoRefresh(
     isInteracting,
     lastInteractionAt,
@@ -101,6 +113,10 @@ function App() {
     setControls((current) => ({ ...current, [key]: value }));
   }
 
+  function refreshNow() {
+    setReloadToken((value) => value + 1);
+  }
+
   function markInteraction() {
     const now = Date.now();
     setLastInteractionAt(now);
@@ -113,8 +129,31 @@ function App() {
     }, INTERACTION_COOLDOWN_MS);
   }
 
-  function refreshNow() {
-    setReloadToken((value) => value + 1);
+  function focusMemory(memoryId: string) {
+    if (!memoryId) {
+      return;
+    }
+    markInteraction();
+    patchControls("mode", "memory_focus");
+    patchControls("centerMemoryId", memoryId);
+    startTransition(() => {
+      setSelectedMemoryId(memoryId);
+    });
+    refreshNow();
+  }
+
+  function clearFilters() {
+    setControls((current) => ({
+      ...current,
+      mode: "project_hot",
+      scope: "project",
+      memoryType: "",
+      tagsInput: "",
+      centerMemoryId: "",
+      query: "",
+    }));
+    setSelectedMemoryId("");
+    refreshNow();
   }
 
   useEffect(() => {
@@ -140,80 +179,72 @@ function App() {
             label: "data(label)",
             "font-size": 11,
             "font-family": "Space Grotesk, Segoe UI, sans-serif",
-            color: "#f8f5ec",
+            color: "#1b2925",
             "text-wrap": "wrap",
-            "text-max-width": 120,
+            "text-max-width": 130,
             "text-valign": "center",
             "text-halign": "center",
-            width: "mapData(size, 0.05, 1, 24, 78)",
-            height: "mapData(size, 0.05, 1, 24, 78)",
-            "border-width": 1.5,
-            "border-color": "#f6f2e8",
-            "background-color": "#2b6d7f",
+            width: "mapData(size, 0.05, 1, 36, 82)",
+            height: "mapData(size, 0.05, 1, 36, 82)",
+            "border-width": 1.6,
+            "border-color": "#b7cbc7",
+            "background-color": "#edf4f2",
             "overlay-opacity": 0,
-            "text-outline-width": "2",
-            "text-outline-color": "#0f1f26",
           },
         },
         {
           selector: "node.manual-pin",
           style: {
             shape: "round-rectangle",
-            "background-color": "#c96f2d",
-            "border-width": 2.2,
+            "border-color": "#c59d64",
+            "border-width": 2.6,
+            "background-color": "#f5ede2",
           },
         },
         {
           selector: "node.selected-node",
           style: {
-            "border-color": "#ffe57a",
-            "border-width": "3.5",
-            "shadow-color": "#ffe57a",
-            "shadow-opacity": "0.38",
-            "shadow-blur": "16",
+            "border-color": "#2f7d76",
+            "border-width": "3.4",
+            "shadow-color": "#7db8b1",
+            "shadow-opacity": "0.25",
+            "shadow-blur": "24",
           },
         },
         {
           selector: "node.type-decision",
-          style: { "background-color": "#406e8e" },
+          style: { "background-color": "#e9f1f9" },
         },
         {
           selector: "node.type-error",
-          style: { "background-color": "#8d3f2f" },
+          style: { "background-color": "#f9ece8" },
         },
         {
           selector: "node.type-architecture",
-          style: { "background-color": "#1f6f64" },
+          style: { "background-color": "#e7f3ef" },
         },
         {
           selector: "edge",
           style: {
-            width: "mapData(weight, 0, 1, 1.2, 6.5)",
-            "line-color": "#f2d0a4",
-            "target-arrow-color": "#f2d0a4",
+            width: "mapData(weight, 0, 1, 1, 4.8)",
+            "line-color": "#c8d4d1",
+            "target-arrow-color": "#c8d4d1",
             "curve-style": "bezier",
-            opacity: "mapData(weight, 0, 1, 0.18, 0.95)",
-            label: "data(label)",
-            "font-size": 8,
-            color: "#d9d0c0",
-            "text-background-opacity": 1,
-            "text-background-color": "#111d22",
-            "text-background-padding": 2,
+            opacity: "mapData(weight, 0, 1, 0.12, 0.9)",
           },
         },
         {
           selector: "edge.manual-edge",
           style: {
-            "line-style": "solid",
-            "line-color": "#ffd166",
-            "target-arrow-color": "#ffd166",
+            "line-color": "#c59d64",
+            "target-arrow-color": "#c59d64",
           },
         },
         {
           selector: "edge.inactive-edge",
           style: {
             "line-style": "dashed",
-            opacity: "0.22",
+            opacity: "0.18",
           },
         },
       ] as any,
@@ -267,26 +298,68 @@ function App() {
     cy.layout({
       name: "fcose",
       animate: true,
-      animationDuration: 380,
+      animationDuration: 320,
       fit: true,
-      padding: 42,
-      idealEdgeLength: 150,
-      nodeRepulsion: 4200,
-      gravity: 0.18,
+      padding: 40,
+      idealEdgeLength: 136,
+      nodeRepulsion: 3900,
+      gravity: 0.16,
     } as any).run();
   }, [graphData, selectedMemoryId]);
 
   useEffect(() => {
-    const project = controls.project.trim();
-    if (!project) {
-      setMetrics(null);
-      return undefined;
-    }
+    let active = true;
+    const loadFacets = async () => {
+      try {
+        const response = await fetchGraphFacets(activeProject || undefined);
+        if (!active) {
+          return;
+        }
+        setFacets(response);
+        setFacetsError("");
+      } catch (error) {
+        if (!active) {
+          return;
+        }
+        setFacetsError(error instanceof Error ? error.message : "No pude leer las claves del cerebro");
+      }
+    };
 
+    void loadFacets();
+    if (!autoRefresh) {
+      return () => {
+        active = false;
+      };
+    }
+    const intervalId = window.setInterval(loadFacets, 15000);
+    return () => {
+      active = false;
+      window.clearInterval(intervalId);
+    };
+  }, [activeProject, autoRefresh, reloadToken]);
+
+  useEffect(() => {
+    if (controls.project.trim() || !facets?.projects.length) {
+      return;
+    }
+    patchControls("project", facets.projects[0].project);
+  }, [controls.project, facets]);
+
+  useEffect(() => {
+    if (controls.mode !== "memory_focus" || controls.centerMemoryId.trim() || selectedMemoryId) {
+      return;
+    }
+    const fallbackMemory = facets?.hot_memories[0]?.memory_id;
+    if (fallbackMemory) {
+      patchControls("centerMemoryId", fallbackMemory);
+    }
+  }, [controls.mode, controls.centerMemoryId, selectedMemoryId, facets]);
+
+  useEffect(() => {
     let active = true;
     const loadMetrics = async () => {
       try {
-        const response = await fetchGraphMetrics(project);
+        const response = await fetchGraphMetrics(activeProject);
         if (!active) {
           return;
         }
@@ -296,7 +369,7 @@ function App() {
         if (!active) {
           return;
         }
-        setMetricsError(error instanceof Error ? error.message : "Could not load metrics");
+        setMetricsError(error instanceof Error ? error.message : "No pude calcular métricas");
       }
     };
 
@@ -311,29 +384,29 @@ function App() {
       active = false;
       window.clearInterval(intervalId);
     };
-  }, [controls.project, autoRefresh, reloadToken]);
+  }, [activeProject, autoRefresh, reloadToken]);
 
   useEffect(() => {
+    const focusMemoryId = controls.centerMemoryId.trim() || selectedMemoryId.trim();
     const canLoadSearch = controls.mode !== "search" || Boolean(deferredQuery.trim());
-    const centerMemoryId = controls.centerMemoryId.trim() || selectedMemoryId.trim();
-    const canLoadFocus = controls.mode !== "memory_focus" || Boolean(centerMemoryId);
-    const canLoadProjectScoped =
-      controls.mode === "memory_focus" || Boolean(controls.project.trim());
+    const canLoadFocus = controls.mode !== "memory_focus" || Boolean(focusMemoryId);
+    const canLoadGraph =
+      (controls.mode === "memory_focus" && canLoadFocus) ||
+      (controls.mode !== "memory_focus" && Boolean(activeProject) && canLoadSearch);
 
-    if (!canLoadSearch || !canLoadFocus || !canLoadProjectScoped) {
+    if (!canLoadGraph) {
       setGraphData(null);
+      setGraphError("");
       return undefined;
     }
 
     let active = true;
     const loadGraph = async () => {
       setGraphLoading(true);
-      const payload = buildSubgraphRequest(
-        { ...controls, query: deferredQuery },
-        selectedMemoryId,
-      );
       try {
-        const response = await fetchGraphSubgraph(payload);
+        const response = await fetchGraphSubgraph(
+          buildSubgraphRequest({ ...controls, query: deferredQuery }, selectedMemoryId),
+        );
         if (!active) {
           return;
         }
@@ -351,7 +424,7 @@ function App() {
         if (!active) {
           return;
         }
-        setGraphError(error instanceof Error ? error.message : "Could not load subgraph");
+        setGraphError(error instanceof Error ? error.message : "No pude cargar el subgrafo");
       } finally {
         if (active) {
           setGraphLoading(false);
@@ -376,6 +449,7 @@ function App() {
     };
   }, [
     controls,
+    activeProject,
     deferredQuery,
     autoRefresh,
     isInteracting,
@@ -387,6 +461,7 @@ function App() {
   useEffect(() => {
     if (!selectedMemoryId) {
       setDetail(null);
+      setDetailError("");
       return undefined;
     }
     let active = true;
@@ -402,7 +477,7 @@ function App() {
         if (!active) {
           return;
         }
-        setDetailError(error instanceof Error ? error.message : "Could not load memory detail");
+        setDetailError(error instanceof Error ? error.message : "No pude abrir esta memoria");
       }
     };
     void loadDetail();
@@ -411,112 +486,155 @@ function App() {
     };
   }, [selectedMemoryId]);
 
-  const activeProject = controls.project.trim();
-
-  function onNumberInput(
-    key: "nodeLimit" | "edgeLimit",
-    event: ChangeEvent<HTMLInputElement>,
-  ) {
+  function onNumberInput(key: "nodeLimit" | "edgeLimit", event: ChangeEvent<HTMLInputElement>) {
     patchControls(key, Number(event.target.value));
   }
 
+  const projects = facets?.projects ?? [];
+  const memoryTypes = facets?.memory_types ?? [];
+  const topTags = facets?.top_tags ?? [];
+  const hotMemories = facets?.hot_memories ?? [];
+  const graphHasNodes = Boolean(graphData?.nodes.length);
+  const graphTitle =
+    controls.mode === "memory_focus"
+      ? "Memoria en foco"
+      : activeProject || "Exploración del cerebro";
+
   return (
     <div className="app-shell">
-      <header className="hero-panel">
+      <header className="topbar">
         <div>
-          <p className="eyebrow">AI Memory Brain</p>
-          <h1>Observable plastic graph</h1>
-          <p className="hero-copy">
-            Watch the brain as a bounded graph of memories and relations. The UI never loads the
-            whole universe, only the active subgraph that matters right now.
+          <p className="kicker">AI MEMORY BRAIN</p>
+          <h1>Mapa limpio del cerebro</h1>
+          <p className="lede">
+            Explora tus memorias con una vista clara, filtros guiados y claves reales sacadas del
+            propio cerebro: proyectos, tipos, etiquetas y memorias calientes.
           </p>
         </div>
-        <div className="hero-panel__status">
-          <span className={`status-pill ${graphRefreshPaused ? "status-pill--paused" : ""}`}>
-            {graphRefreshPaused ? "graph refresh paused" : "graph refresh live"}
+        <div className="topbar__meta">
+          <span className="soft-pill">
+            {graphRefreshPaused ? "Auto-refresh en pausa" : autoRefresh ? "Auto-refresh activo" : "Refresco manual"}
           </span>
-          <span className="status-pill status-pill--quiet">
-            {graphLoading ? "loading graph" : "graph ready"}
+          <span className="soft-pill soft-pill--muted">
+            {graphLoading ? "cargando mapa" : "mapa listo"}
           </span>
-          <button className="ghost-button" onClick={refreshNow} type="button">
-            refresh now
+          <button className="primary-button" onClick={refreshNow} type="button">
+            Actualizar ahora
           </button>
         </div>
       </header>
 
-      <section className="control-panel">
-        <div className="control-grid">
-          <label className="control-field">
-            <span>Project</span>
-            <input
+      <section className="toolbar-card">
+        <div className="section-heading">
+          <div>
+            <p className="section-kicker">Explorar</p>
+            <h2>Controles principales</h2>
+          </div>
+          <button className="ghost-button" onClick={clearFilters} type="button">
+            Limpiar filtros
+          </button>
+        </div>
+
+        <div className="toolbar-grid">
+          <label className="field">
+            <span>Proyecto</span>
+            <select
               value={controls.project}
               onChange={(event) => patchControls("project", event.target.value)}
-              placeholder="ai-memory"
-            />
+            >
+              <option value="">Selecciona un proyecto</option>
+              {projects.map((item) => (
+                <option key={item.project} value={item.project}>
+                  {item.project} · {item.memory_count}
+                </option>
+              ))}
+            </select>
           </label>
 
-          <label className="control-field">
-            <span>Mode</span>
+          <label className="field">
+            <span>Vista</span>
             <select
               value={controls.mode}
               onChange={(event) => patchControls("mode", event.target.value as GraphControlsState["mode"])}
             >
-              <option value="project_hot">project_hot</option>
-              <option value="search">search</option>
-              <option value="memory_focus">memory_focus</option>
+              <option value="project_hot">Proyecto activo</option>
+              <option value="search">Buscar ideas</option>
+              <option value="memory_focus">Memoria en foco</option>
             </select>
           </label>
 
-          <label className="control-field">
-            <span>Scope</span>
+          <label className="field">
+            <span>Alcance</span>
             <select
               value={controls.scope}
               onChange={(event) => patchControls("scope", event.target.value as GraphControlsState["scope"])}
             >
-              <option value="project">project</option>
-              <option value="bridged">bridged</option>
-              <option value="global">global</option>
+              <option value="project">Solo proyecto</option>
+              <option value="bridged">Proyectos conectados</option>
+              <option value="global">Global</option>
             </select>
           </label>
 
-          <label className="control-field">
-            <span>Memory type</span>
-            <input
+          <label className="field">
+            <span>Tipo de memoria</span>
+            <select
               value={controls.memoryType}
               onChange={(event) => patchControls("memoryType", event.target.value)}
-              placeholder="architecture"
-            />
+            >
+              <option value="">Todos</option>
+              {memoryTypes.map((item) => (
+                <option key={item.memory_type} value={item.memory_type}>
+                  {item.memory_type} · {item.count}
+                </option>
+              ))}
+            </select>
           </label>
 
-          <label className="control-field control-field--wide">
-            <span>Tags</span>
-            <input
-              value={controls.tagsInput}
+          <label className="field">
+            <span>Etiqueta clave</span>
+            <select
+              value={selectedTag}
               onChange={(event) => patchControls("tagsInput", event.target.value)}
-              placeholder="concept/event-sourcing,pattern/replay"
-            />
+            >
+              <option value="">Sin etiqueta</option>
+              {topTags.map((item) => (
+                <option key={item.tag} value={item.tag}>
+                  {item.tag} · {item.count}
+                </option>
+              ))}
+            </select>
           </label>
 
-          <label className="control-field control-field--wide">
-            <span>Search query</span>
+          <label className="field field--wide">
+            <span>Memoria focal</span>
+            <select
+              value={controls.centerMemoryId}
+              onChange={(event) => patchControls("centerMemoryId", event.target.value)}
+            >
+              <option value="">Elegir memoria caliente</option>
+              {hotMemories.map((item) => (
+                <option key={item.memory_id} value={item.memory_id}>
+                  {item.content_preview}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="field field--wide">
+            <span>Búsqueda</span>
             <input
               value={controls.query}
               onChange={(event) => patchControls("query", event.target.value)}
-              placeholder="event sourcing replay audit trail rebuild projections"
+              placeholder={
+                controls.mode === "search"
+                  ? "Describe lo que quieres recuperar"
+                  : "Solo se usa en la vista Buscar ideas"
+              }
             />
           </label>
 
-          <label className="control-field control-field--wide">
-            <span>Center memory</span>
-            <input
-              value={controls.centerMemoryId}
-              onChange={(event) => patchControls("centerMemoryId", event.target.value)}
-              placeholder={selectedMemoryId || "click a node to focus it"}
-            />
-          </label>
-
-          <label className="control-field">
-            <span>Node limit</span>
+          <label className="field">
+            <span>Nodos</span>
             <input
               type="number"
               min={1}
@@ -526,8 +644,8 @@ function App() {
             />
           </label>
 
-          <label className="control-field">
-            <span>Edge limit</span>
+          <label className="field">
+            <span>Aristas</span>
             <input
               type="number"
               min={1}
@@ -538,14 +656,14 @@ function App() {
           </label>
         </div>
 
-        <div className="control-panel__actions">
+        <div className="toolbar-actions">
           <label className="toggle">
             <input
               checked={controls.includeInactive}
               onChange={(event) => patchControls("includeInactive", event.target.checked)}
               type="checkbox"
             />
-            <span>include inactive edges</span>
+            <span>Incluir enlaces inactivos</span>
           </label>
           <label className="toggle">
             <input
@@ -553,162 +671,302 @@ function App() {
               onChange={(event) => setAutoRefresh(event.target.checked)}
               type="checkbox"
             />
-            <span>auto refresh</span>
+            <span>Auto-refresh</span>
           </label>
           <button
-            className="focus-button"
-            onClick={() => {
-              if (!selectedMemoryId) {
-                return;
-              }
-              patchControls("mode", "memory_focus");
-              patchControls("centerMemoryId", selectedMemoryId);
-              refreshNow();
-            }}
+            className="ghost-button"
+            onClick={() => focusMemory(controls.centerMemoryId || selectedMemoryId)}
             type="button"
           >
-            focus selected memory
+            Enfocar memoria elegida
           </button>
         </div>
       </section>
 
+      <section className="brain-keys-card">
+        <div className="section-heading">
+          <div>
+            <p className="section-kicker">Claves del cerebro</p>
+            <h2>Atajos y sugerencias reales</h2>
+          </div>
+          <span className="section-meta">
+            {facets?.generated_at ? `actualizado ${formatTimestamp(facets.generated_at)}` : "leyendo cerebro…"}
+          </span>
+        </div>
+
+        <div className="brain-keys-grid">
+          <details className="brain-key" open>
+            <summary>
+              <span>Proyectos</span>
+              <strong>{projects.length}</strong>
+            </summary>
+            <div className="brain-key__content">
+              {projects.map((item) => (
+                <button
+                  className="chip-button"
+                  key={item.project}
+                  onClick={() => patchControls("project", item.project)}
+                  type="button"
+                >
+                  {item.project}
+                  <small>{item.memory_count}</small>
+                </button>
+              ))}
+            </div>
+          </details>
+
+          <details className="brain-key" open>
+            <summary>
+              <span>Tipos</span>
+              <strong>{memoryTypes.length}</strong>
+            </summary>
+            <div className="brain-key__content">
+              {memoryTypes.map((item) => (
+                <button
+                  className="chip-button"
+                  key={item.memory_type}
+                  onClick={() => patchControls("memoryType", item.memory_type)}
+                  type="button"
+                >
+                  {item.memory_type}
+                  <small>{item.count}</small>
+                </button>
+              ))}
+            </div>
+          </details>
+
+          <details className="brain-key" open>
+            <summary>
+              <span>Etiquetas</span>
+              <strong>{topTags.length}</strong>
+            </summary>
+            <div className="brain-key__content">
+              {topTags.map((item) => (
+                <button
+                  className="chip-button"
+                  key={item.tag}
+                  onClick={() => patchControls("tagsInput", item.tag)}
+                  type="button"
+                >
+                  {item.tag}
+                  <small>{item.count}</small>
+                </button>
+              ))}
+            </div>
+          </details>
+
+          <details className="brain-key" open>
+            <summary>
+              <span>Memorias calientes</span>
+              <strong>{hotMemories.length}</strong>
+            </summary>
+            <div className="memory-picks">
+              {hotMemories.map((item) => (
+                <button
+                  className="memory-pick"
+                  key={item.memory_id}
+                  onClick={() => focusMemory(item.memory_id)}
+                  type="button"
+                >
+                  <span className="memory-pick__title">{item.content_preview}</span>
+                  <span className="memory-pick__meta">
+                    {(item.memory_type || "general").replace(/_/g, " ")} · {item.prominence.toFixed(2)}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </details>
+        </div>
+
+        {facetsError ? <p className="notice notice--warning">{facetsError}</p> : null}
+      </section>
+
       <section className="metrics-strip">
         <MetricCard
-          label="memories"
+          label="Memorias"
           value={metrics?.memory_count ?? "—"}
-          accent="teal"
+          helper="volumen visible del cerebro"
         />
         <MetricCard
-          label="active relations"
+          label="Relaciones activas"
           value={metrics?.active_relation_count ?? "—"}
-          accent="sun"
+          helper="enlaces actualmente vivos"
         />
         <MetricCard
-          label="pinned"
+          label="Fijadas"
           value={metrics?.pinned_memory_count ?? "—"}
-          accent="ember"
+          helper="anclas manuales estables"
         />
         <MetricCard
-          label="hot cluster"
+          label="Cluster caliente"
           value={metrics?.hot_memory_count ?? "—"}
-          accent="slate"
+          helper="memorias más presentes"
         />
       </section>
 
       <section className="workspace">
-        <article className="graph-card">
-          <div className="card-header">
+        <article className="graph-panel">
+          <div className="section-heading">
             <div>
-              <p className="eyebrow">Subgraph</p>
-              <h2>{activeProject || "Select a project"}</h2>
+              <p className="section-kicker">Subgrafo</p>
+              <h2>{graphTitle}</h2>
             </div>
-            <div className="summary-meta">
-              <span>{graphData?.summary.node_count ?? 0} nodes</span>
-              <span>{graphData?.summary.edge_count ?? 0} edges</span>
-              <span>{graphData?.summary.mode ?? controls.mode}</span>
+            <div className="panel-badges">
+              <span className="soft-pill">{graphData?.summary.node_count ?? 0} nodos</span>
+              <span className="soft-pill">{graphData?.summary.edge_count ?? 0} enlaces</span>
+              <span className="soft-pill soft-pill--muted">
+                {controls.mode === "project_hot"
+                  ? "proyecto activo"
+                  : controls.mode === "search"
+                    ? "búsqueda"
+                    : "foco"}
+              </span>
             </div>
           </div>
 
-          <div className="card-banner">
+          <div className="subtle-row">
             <span>
-              allowed projects: {graphData?.summary.allowed_projects.join(", ") || "none"}
+              {controls.scope === "global"
+                ? "alcance global"
+                : controls.scope === "bridged"
+                  ? "incluye proyectos conectados"
+                  : "solo este proyecto"}
             </span>
             <span>
               {graphRefreshPaused
-                ? "interaction freeze active"
+                ? "pauso el refresco mientras mueves el mapa"
                 : autoRefresh
-                  ? "polling every 10s"
-                  : "manual refresh"}
+                  ? "refresco automático cada 10s"
+                  : "refresco manual"}
             </span>
           </div>
 
-          <div className="graph-canvas" ref={graphRef} />
+          {graphLoading ? <div className="loading-line" /> : null}
+          {graphError ? <p className="notice notice--danger">{graphError}</p> : null}
+          {metricsError ? <p className="notice notice--warning">{metricsError}</p> : null}
 
-          {graphError ? <p className="error-line">{graphError}</p> : null}
-          {metricsError ? <p className="error-line">{metricsError}</p> : null}
+          {graphHasNodes ? (
+            <div className="graph-surface">
+              <div className="graph-canvas" ref={graphRef} />
+            </div>
+          ) : (
+            <div className="empty-state">
+              <strong>No hay nodos para esta vista todavía.</strong>
+              <p>
+                Prueba con otro proyecto, quita filtros o usa una de las claves del cerebro para
+                arrancar desde una memoria caliente.
+              </p>
+              <div className="empty-state__actions">
+                {projects.slice(0, 3).map((item) => (
+                  <button
+                    className="ghost-button"
+                    key={item.project}
+                    onClick={() => patchControls("project", item.project)}
+                    type="button"
+                  >
+                    Abrir {item.project}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="legend-row">
+            <span><i className="legend-dot legend-dot--architecture" /> arquitectura</span>
+            <span><i className="legend-dot legend-dot--decision" /> decisión</span>
+            <span><i className="legend-dot legend-dot--error" /> error</span>
+            <span><i className="legend-dot legend-dot--pin" /> fijada</span>
+          </div>
         </article>
 
-        <aside className="side-panel">
-          <section className="detail-card">
-            <div className="card-header">
+        <aside className="inspector">
+          <section className="info-card">
+            <div className="section-heading">
               <div>
-                <p className="eyebrow">Memory detail</p>
-                <h2>{detail?.memory.memory_type ?? "No selection"}</h2>
+                <p className="section-kicker">Detalle</p>
+                <h2>{detail?.memory.memory_type ? detail.memory.memory_type.replace(/_/g, " ") : "Sin selección"}</h2>
               </div>
-              <span className="mono-chip">
-                {detail?.memory.prominence?.toFixed(2) ?? "0.00"} prominence
+              <span className="soft-pill">
+                {detail ? `${detail.memory.prominence.toFixed(2)} prominencia` : "elige un nodo"}
               </span>
             </div>
 
             {detail ? (
               <>
-                <p className="detail-copy">{detail.memory.content || detail.memory.summary}</p>
-                <div className="tag-row">
-                  {detail.memory.tags.map((tag) => (
-                    <span className="tag-chip" key={tag}>
-                      {tag}
-                    </span>
-                  ))}
-                </div>
-                <dl className="detail-grid">
-                  <div>
-                    <dt>project</dt>
-                    <dd>{detail.memory.project || "unknown"}</dd>
+                <p className="lead-copy">{detail.memory.content_preview}</p>
+                <details className="fold-card" open>
+                  <summary>Contenido completo</summary>
+                  <p>{detail.memory.content || detail.memory.summary}</p>
+                </details>
+                <details className="fold-card" open>
+                  <summary>Etiquetas y señales</summary>
+                  <div className="tag-cloud">
+                    {detail.memory.tags.map((tag) => (
+                      <button
+                        className="tag-pill"
+                        key={tag}
+                        onClick={() => patchControls("tagsInput", tag)}
+                        type="button"
+                      >
+                        {tag}
+                      </button>
+                    ))}
                   </div>
-                  <div>
-                    <dt>accesses</dt>
-                    <dd>{detail.memory.access_count}</dd>
-                  </div>
-                  <div>
-                    <dt>activation</dt>
-                    <dd>{detail.memory.activation_score.toFixed(3)}</dd>
-                  </div>
-                  <div>
-                    <dt>stability</dt>
-                    <dd>{detail.memory.stability_score.toFixed(3)}</dd>
-                  </div>
-                  <div>
-                    <dt>manual pin</dt>
-                    <dd>{detail.memory.manual_pin ? "yes" : "no"}</dd>
-                  </div>
-                  <div>
-                    <dt>last seen</dt>
-                    <dd>{formatTimestamp(detail.memory.last_accessed_at)}</dd>
-                  </div>
-                </dl>
+                  <dl className="detail-list">
+                    <div>
+                      <dt>Proyecto</dt>
+                      <dd>{detail.memory.project || "sin proyecto"}</dd>
+                    </div>
+                    <div>
+                      <dt>Accesos</dt>
+                      <dd>{detail.memory.access_count}</dd>
+                    </div>
+                    <div>
+                      <dt>Activación</dt>
+                      <dd>{detail.memory.activation_score.toFixed(3)}</dd>
+                    </div>
+                    <div>
+                      <dt>Estabilidad</dt>
+                      <dd>{detail.memory.stability_score.toFixed(3)}</dd>
+                    </div>
+                    <div>
+                      <dt>Fijada</dt>
+                      <dd>{detail.memory.manual_pin ? "sí" : "no"}</dd>
+                    </div>
+                    <div>
+                      <dt>Último acceso</dt>
+                      <dd>{formatTimestamp(detail.memory.last_accessed_at)}</dd>
+                    </div>
+                  </dl>
+                </details>
               </>
             ) : (
-              <p className="detail-copy">
-                Click any node to inspect its content, relation list and plasticity markers.
-              </p>
+              <div className="empty-mini">
+                Selecciona una memoria del mapa o una memoria caliente del acordeón para ver su
+                contenido y sus señales internas.
+              </div>
             )}
-            {detailError ? <p className="error-line">{detailError}</p> : null}
+            {detailError ? <p className="notice notice--warning">{detailError}</p> : null}
           </section>
 
-          <section className="detail-card">
-            <div className="card-header">
+          <section className="info-card">
+            <div className="section-heading">
               <div>
-                <p className="eyebrow">Relations</p>
-                <h2>{detail?.relation_count ?? 0} known links</h2>
+                <p className="section-kicker">Enlaces</p>
+                <h2>{detail?.relation_count ?? 0} conexiones</h2>
               </div>
-              <span className="mono-chip">
-                {metrics?.avg_activation_score?.toFixed(2) ?? "0.00"} avg activation
+              <span className="soft-pill soft-pill--muted">
+                {metrics ? `${metrics.avg_activation_score.toFixed(2)} media` : "sin media"}
               </span>
             </div>
-            <div className="relation-list">
+
+            <div className="relation-stack">
               {detail?.relations.length ? (
                 detail.relations.map((relation) => (
                   <button
                     className="relation-row"
                     key={relation.id}
-                    onClick={() => {
-                      patchControls("mode", "memory_focus");
-                      patchControls("centerMemoryId", relation.other_memory_id);
-                      startTransition(() => {
-                        setSelectedMemoryId(relation.other_memory_id);
-                      });
-                      refreshNow();
-                    }}
+                    onClick={() => focusMemory(relation.other_memory_id)}
                     type="button"
                   >
                     <span className="relation-row__headline">
@@ -720,29 +978,59 @@ function App() {
                   </button>
                 ))
               ) : (
-                <p className="detail-copy">
-                  No relations available for the current selection yet.
-                </p>
+                <div className="empty-mini">
+                  Aquí aparecerán las relaciones más cercanas cuando selecciones una memoria.
+                </div>
               )}
             </div>
           </section>
 
-          <section className="detail-card">
-            <div className="card-header">
+          <section className="info-card">
+            <div className="section-heading">
               <div>
-                <p className="eyebrow">Type mix</p>
-                <h2>Project pulse</h2>
+                <p className="section-kicker">Resumen</p>
+                <h2>Lectura rápida del cerebro</h2>
               </div>
-              <span className="mono-chip">{metrics?.bridge_count ?? 0} bridges</span>
+              <span className="soft-pill soft-pill--muted">
+                {metrics?.bridge_count ?? 0} puentes
+              </span>
             </div>
-            <div className="type-list">
-              {metrics?.top_memory_types.map((item) => (
-                <div className="type-row" key={item.memory_type}>
-                  <span>{item.memory_type}</span>
-                  <strong>{item.count}</strong>
-                </div>
-              )) || <p className="detail-copy">Metrics will appear after the first successful load.</p>}
-            </div>
+
+            <details className="fold-card" open>
+              <summary>Tipos dominantes</summary>
+              <div className="summary-list">
+                {metrics?.top_memory_types.length ? (
+                  metrics.top_memory_types.map((item) => (
+                    <div className="summary-row" key={item.memory_type}>
+                      <span>{item.memory_type}</span>
+                      <strong>{item.count}</strong>
+                    </div>
+                  ))
+                ) : (
+                  <p>Sin tipos destacados todavía.</p>
+                )}
+              </div>
+            </details>
+
+            <details className="fold-card" open>
+              <summary>Etiquetas más repetidas</summary>
+              <div className="tag-cloud">
+                {topTags.length ? (
+                  topTags.map((item) => (
+                    <button
+                      className="tag-pill"
+                      key={item.tag}
+                      onClick={() => patchControls("tagsInput", item.tag)}
+                      type="button"
+                    >
+                      {item.tag}
+                    </button>
+                  ))
+                ) : (
+                  <p>No hay etiquetas disponibles.</p>
+                )}
+              </div>
+            </details>
           </section>
         </aside>
       </section>

@@ -987,13 +987,24 @@ async def structured_search_memories(
     allowed_projects = set(await resolve_scope_projects(project, normalized_scope))
     exclude_ids = {str(memory_id) for memory_id in (exclude_memory_ids or [])}
     query_embedding = await get_embedding(query)
-    conditions = []
+    conditions: list[FieldCondition] = []
+    project_conditions: list[FieldCondition] = []
     if project and normalized_scope == "project":
         conditions.append(FieldCondition(key="project_id", match=MatchValue(value=project)))
+    elif allowed_projects:
+        project_conditions = [
+            FieldCondition(key="project_id", match=MatchValue(value=project_name))
+            for project_name in sorted(allowed_projects)
+        ]
     if memory_type:
         conditions.append(FieldCondition(key="memory_type", match=MatchValue(value=memory_type)))
-    query_filter = Filter(must=conditions) if conditions else None
+    if project_conditions:
+        query_filter = Filter(must=conditions, should=project_conditions)
+    else:
+        query_filter = Filter(must=conditions) if conditions else None
     raw_limit = max(limit * 6, 24)
+    if project_conditions:
+        raw_limit = max(raw_limit, limit * max(6, len(project_conditions) * 3))
     response = await qdrant.query_points(
         collection_name=COLLECTION_NAME,
         query=query_embedding,
@@ -1128,9 +1139,12 @@ def classify_relation_heuristic(
 ) -> Optional[dict[str, Any]]:
     source_text = str(source.get("content", "")).lower()
     candidate_text = str(candidate.get("content", "")).lower()
+    source_tags = normalize_tags(source.get("tags", []))
+    candidate_tags = normalize_tags(candidate.get("tags", []))
     same_type = source.get("memory_type") == candidate.get("memory_type")
     lexical_overlap = compute_text_overlap(source_text, candidate_text)
     cross_project = source.get("project") != candidate.get("project")
+    tag_coverage = len(shared_tags) / max(1, min(len(source_tags), len(candidate_tags)))
     if semantic_score >= 0.95 and (same_type or shared_tags):
         return {"relation_type": "same_concept", "weight": clamp01(semantic_score), "reason": "high_semantic_overlap"}
     if shared_tags and same_type and lexical_overlap >= 0.45:
@@ -1139,6 +1153,13 @@ def classify_relation_heuristic(
             "relation_type": relation_type,
             "weight": clamp01(max(semantic_score, 0.82 if cross_project else 0.86)),
             "reason": "lexical_overlap_shared_tags",
+        }
+    if same_type and tag_coverage >= 0.66 and semantic_score >= 0.48:
+        relation_type = "derived_from" if cross_project else "supports"
+        return {
+            "relation_type": relation_type,
+            "weight": clamp01(max(semantic_score, 0.72 if cross_project else 0.76)),
+            "reason": "dense_tag_overlap",
         }
     if semantic_score >= 0.9 and shared_tags:
         return {"relation_type": "extends", "weight": clamp01(semantic_score - 0.05), "reason": "shared_tags"}
@@ -1159,6 +1180,12 @@ def classify_relation_heuristic(
         return {"relation_type": "applies_to", "weight": clamp01(semantic_score - 0.08), "reason": "tag_supported_similarity"}
     if semantic_score >= 0.88 and cross_project:
         return {"relation_type": "derived_from", "weight": clamp01(semantic_score - 0.06), "reason": "cross_project_reuse"}
+    if same_type and shared_tags and semantic_score >= 0.72:
+        return {
+            "relation_type": "supports",
+            "weight": clamp01(max(semantic_score, 0.72)),
+            "reason": "same_type_shared_tags_fallback",
+        }
     return None
 
 
@@ -1651,11 +1678,15 @@ async def build_graph_subgraph(payload: GraphSubgraphRequest) -> dict[str, Any]:
                 "mode": mode,
                 "project": project_name,
                 "scope": normalized_scope,
+                "query": payload.query.strip() or None,
+                "center_memory_id": center_memory_id or None,
                 "node_count": 0,
                 "edge_count": 0,
                 "seed_count": 0,
                 "requested_node_limit": payload.node_limit,
                 "requested_edge_limit": payload.edge_limit,
+                "truncated_nodes": False,
+                "truncated_edges": False,
                 "allowed_projects": sorted(allowed_projects),
             },
         }
@@ -1787,6 +1818,126 @@ async def get_graph_metrics(project: Optional[str] = None) -> dict[str, Any]:
         "avg_stability_score": round(float(memory_row["avg_stability_score"] or 0.0), 4),
         "bridge_count": len([item for item in bridges if item.get("active")]),
         "top_memory_types": [serialize_row(row) or {} for row in type_rows],
+        "generated_at": now_iso(),
+    }
+
+
+async def get_graph_facets(project: Optional[str] = None) -> dict[str, Any]:
+    if not pg_pool:
+        raise RuntimeError("postgres_unavailable")
+    async with pg_pool.acquire() as conn:
+        project_rows = await conn.fetch(
+            """
+            SELECT
+                p.name AS project,
+                COUNT(ml.id)::int AS memory_count,
+                COUNT(ml.id) FILTER (WHERE ml.manual_pin)::int AS pinned_memory_count
+            FROM projects p
+            LEFT JOIN memory_log ml ON ml.project_id = p.id
+            WHERE ($1::text IS NULL OR p.name = $1 OR ml.id IS NOT NULL)
+            GROUP BY p.name
+            HAVING COUNT(ml.id) > 0
+            ORDER BY
+                CASE WHEN $1::text IS NOT NULL AND p.name = $1 THEN 0 ELSE 1 END,
+                COUNT(ml.id) DESC,
+                p.name ASC
+            LIMIT 100
+            """,
+            project,
+        )
+        type_rows = await conn.fetch(
+            """
+            SELECT ml.action_type AS memory_type, COUNT(*)::int AS count
+            FROM memory_log ml
+            LEFT JOIN projects p ON p.id = ml.project_id
+            WHERE ($1::text IS NULL OR p.name = $1)
+            GROUP BY ml.action_type
+            ORDER BY count DESC, ml.action_type ASC
+            LIMIT 12
+            """,
+            project,
+        )
+        tag_rows = await conn.fetch(
+            """
+            SELECT tag, COUNT(*)::int AS count
+            FROM (
+                SELECT unnest(COALESCE(ml.tags, '{}'::text[])) AS tag
+                FROM memory_log ml
+                LEFT JOIN projects p ON p.id = ml.project_id
+                WHERE ($1::text IS NULL OR p.name = $1)
+            ) tags
+            WHERE tag IS NOT NULL AND tag <> ''
+            GROUP BY tag
+            ORDER BY count DESC, tag ASC
+            LIMIT 16
+            """,
+            project,
+        )
+        hot_rows = await conn.fetch(
+            """
+            SELECT
+                ml.id,
+                p.name AS project,
+                ml.action_type AS memory_type,
+                ml.summary,
+                ml.details,
+                ml.manual_pin,
+                ml.activation_score,
+                ml.stability_score,
+                ml.access_count,
+                ml.last_accessed_at,
+                ml.importance,
+                ml.tags
+            FROM memory_log ml
+            LEFT JOIN projects p ON p.id = ml.project_id
+            WHERE ($1::text IS NULL OR p.name = $1)
+            ORDER BY
+                ml.manual_pin DESC,
+                ml.activation_score DESC,
+                ml.stability_score DESC,
+                ml.last_accessed_at DESC NULLS LAST,
+                ml.importance DESC,
+                ml.created_at DESC
+            LIMIT 12
+            """,
+            project,
+        )
+
+    hot_memories: list[dict[str, Any]] = []
+    for row in hot_rows:
+        details = row["details"] if isinstance(row["details"], dict) else {}
+        record = {
+            "id": str(row["id"]),
+            "project": row["project"],
+            "memory_type": row["memory_type"],
+            "summary": row["summary"],
+            "content": details.get("content") or row["summary"],
+            "importance": float(row["importance"] or 0.5),
+            "tags": normalize_tags(row["tags"] or []),
+            "access_count": int(row["access_count"] or 0),
+            "last_accessed_at": row["last_accessed_at"],
+            "activation_score": float(row["activation_score"] or 0.0),
+            "stability_score": float(row["stability_score"] or 0.5),
+            "manual_pin": bool(row["manual_pin"]),
+        }
+        hot_memories.append(
+            {
+                "memory_id": record["id"],
+                "project": record["project"],
+                "memory_type": record["memory_type"],
+                "content_preview": memory_content_preview(str(record["content"])),
+                "tags": record["tags"],
+                "manual_pin": record["manual_pin"],
+                "prominence": compute_memory_prominence(record),
+            }
+        )
+
+    return {
+        "project": project,
+        "projects": [serialize_row(row) or {} for row in project_rows],
+        "memory_types": [serialize_row(row) or {} for row in type_rows],
+        "top_tags": [serialize_row(row) or {} for row in tag_rows],
+        "hot_memories": hot_memories,
         "generated_at": now_iso(),
     }
 
@@ -3030,6 +3181,15 @@ async def api_graph_metrics(project: Optional[str] = None):
         return await get_graph_metrics(project=project)
     except Exception as exc:
         logger.exception("api_graph_metrics fallo")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/graph/facets")
+async def api_graph_facets(project: Optional[str] = None):
+    try:
+        return await get_graph_facets(project=project)
+    except Exception as exc:
+        logger.exception("api_graph_facets fallo")
         raise HTTPException(status_code=500, detail=str(exc))
 
 
