@@ -5,3 +5,5 @@
 __pycache__/
 *.py[cod]
 .DS_Store
+.pytest_cache/
+/evals/results/*.json

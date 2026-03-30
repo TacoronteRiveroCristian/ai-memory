@@ -1,0 +1,144 @@
+{
+  "retrieval": [
+    {
+      "name": "same_project_event_sourcing",
+      "project": "retrieval-main",
+      "seed_memories": [
+        {
+          "alias": "event_core",
+          "content": "Event sourcing keeps a replayable audit trail and rebuilds projections after failures.",
+          "memory_type": "architecture",
+          "tags": "concept/event-sourcing,pattern/replay,tech/postgres",
+          "importance": 0.92
+        },
+        {
+          "alias": "event_projection",
+          "content": "Replayable audit trails with event sourcing let us rebuild projections and recover state reliably.",
+          "memory_type": "architecture",
+          "tags": "concept/event-sourcing,pattern/replay,tech/postgres",
+          "importance": 0.9
+        }
+      ],
+      "queries": [
+        {
+          "query": "event sourcing replay audit trail rebuild projections",
+          "project": "retrieval-main",
+          "scope": "project",
+          "tags": ["concept/event-sourcing"],
+          "limit": 3,
+          "expected_hits": ["event_core", "event_projection"],
+          "forbidden_hits": [],
+          "expected_relation_types": ["same_concept", "extends", "supports", "applies_to"]
+        }
+      ]
+    }
+  ],
+  "bridges": [
+    {
+      "name": "prompt_versioning_bridge",
+      "project_a": "bridge-alpha",
+      "project_b": "bridge-beta",
+      "pre_bridge_memories": [
+        {
+          "alias": "alpha_prompt_versioning",
+          "project": "bridge-alpha",
+          "content": "Prompt versioning stores experiment history and regression findings for retrieval tuning.",
+          "memory_type": "general",
+          "tags": "concept/prompt-versioning,pattern/evaluation",
+          "importance": 0.88
+        },
+        {
+          "alias": "beta_prompt_versioning_old",
+          "project": "bridge-beta",
+          "content": "Another product also uses prompt versioning to preserve experiment history and regression findings.",
+          "memory_type": "general",
+          "tags": "concept/prompt-versioning,pattern/evaluation",
+          "importance": 0.86
+        }
+      ],
+      "bridge": {
+        "project": "bridge-alpha",
+        "related_project": "bridge-beta",
+        "reason": "Prompt versioning se reutiliza entre productos.",
+        "active": true,
+        "created_by": "eval"
+      },
+      "post_bridge_memories": [
+        {
+          "alias": "beta_prompt_versioning_new",
+          "project": "bridge-beta",
+          "content": "Prompt versioning for the second project captures regression findings and experiment history in a reusable way.",
+          "memory_type": "general",
+          "tags": "concept/prompt-versioning,pattern/evaluation",
+          "importance": 0.9
+        }
+      ],
+      "query": {
+        "query": "prompt versioning experiment history regression findings",
+        "project": "bridge-alpha",
+        "scope": "bridged",
+        "limit": 6,
+        "expected_hits": ["alpha_prompt_versioning", "beta_prompt_versioning_new"],
+        "forbidden_hits_before_bridge": ["beta_prompt_versioning_old", "beta_prompt_versioning_new"]
+      }
+    }
+  ],
+  "plasticity": [
+    {
+      "name": "context_caching_plasticity",
+      "project": "plasticity-main",
+      "clock_start": "2030-01-01T00:00:00+00:00",
+      "seed_memories": [
+        {
+          "alias": "auto_a",
+          "content": "Context caching reduces token cost by reusing repeated prefixes in long conversations.",
+          "memory_type": "general",
+          "tags": "concept/context-caching,tech/llm",
+          "importance": 0.9
+        },
+        {
+          "alias": "auto_b",
+          "content": "Reusing repeated prompt prefixes through context caching lowers token cost for long LLM sessions.",
+          "memory_type": "general",
+          "tags": "concept/context-caching,tech/llm",
+          "importance": 0.9
+        },
+        {
+          "alias": "manual_a",
+          "content": "ADR records architectural decisions with rationale and alternatives for later review.",
+          "memory_type": "decision",
+          "tags": "concept/adr,pattern/documentation",
+          "importance": 0.84
+        },
+        {
+          "alias": "manual_b",
+          "content": "Decision logs preserve rationale and alternatives so architecture reviews remain explainable.",
+          "memory_type": "decision",
+          "tags": "concept/adr,pattern/documentation",
+          "importance": 0.84
+        }
+      ],
+      "manual_relation": {
+        "source": "manual_a",
+        "target": "manual_b",
+        "relation_type": "supports",
+        "reason": "Curated benchmark relation.",
+        "weight": 0.77
+      },
+      "reinforcement_query": {
+        "query": "context caching repeated prompt prefixes token cost",
+        "project": "plasticity-main",
+        "scope": "project",
+        "limit": 4
+      },
+      "reinforcement_runs": 3,
+      "decay_clock": "2030-02-20T00:00:00+00:00",
+      "plasticity_session": {
+        "goal": "Tick de plasticidad",
+        "outcome": "Medir decay",
+        "summary": "Tick de plasticidad para medir refuerzo y decay sin usar providers reales.",
+        "tags": ["tests", "plasticity"]
+      }
+    }
+  ]
+}

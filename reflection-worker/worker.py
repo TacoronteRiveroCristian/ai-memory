@@ -27,6 +27,8 @@ REFLECTION_INTERVAL = int(os.environ.get("REFLECTION_INTERVAL_SECONDS", "21600")
 REFLECTION_POLL_INTERVAL = int(os.environ.get("REFLECTION_POLL_INTERVAL_SECONDS", "30"))
 WORKER_HEARTBEAT_KEY = os.environ.get("WORKER_HEARTBEAT_KEY", "reflection_worker:heartbeat")
 WORKER_HEARTBEAT_TTL = int(os.environ.get("WORKER_HEARTBEAT_TTL_SECONDS", "120"))
+AI_MEMORY_TEST_MODE = os.environ.get("AI_MEMORY_TEST_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
+AI_MEMORY_TEST_NOW = os.environ.get("AI_MEMORY_TEST_NOW", "").strip()
 HEARTBEAT_FILE = Path("/tmp/reflection-worker-heartbeat")
 ADVISORY_LOCK_KEY = 829311
 VALID_TASK_STATES = {"pending", "active", "blocked", "done", "cancelled"}
@@ -35,9 +37,17 @@ pg_pool: Optional[asyncpg.Pool] = None
 redis_client: Optional[aioredis.Redis] = None
 http_client: Optional[httpx.AsyncClient] = None
 deepseek_client: Optional[AsyncOpenAI] = None
+TEST_NOW_OVERRIDE: Optional[datetime] = None
 
 
 def now_utc() -> datetime:
+    if TEST_NOW_OVERRIDE is not None:
+        return TEST_NOW_OVERRIDE
+    if AI_MEMORY_TEST_MODE and AI_MEMORY_TEST_NOW:
+        parsed = datetime.fromisoformat(AI_MEMORY_TEST_NOW)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
     return datetime.now(timezone.utc)
 
 
@@ -80,6 +90,95 @@ def normalize_tags(tags: Any) -> list[str]:
     if isinstance(tags, str):
         return [tag.strip() for tag in tags.split(",") if tag.strip()]
     return []
+
+
+def deterministic_reflection(payload: dict[str, Any], working_memory: list[str]) -> dict[str, Any]:
+    project_summary = payload.get("summary", "").strip() or payload.get("outcome", "").strip()
+    base_tags = normalize_tags(payload.get("tags", []))
+    agent_id = str(payload.get("agent_id", "reflection-test")).strip() or "reflection-test"
+
+    durable_memories = []
+    if project_summary:
+        durable_memories.append(
+            {
+                "content": f"PROJECT SUMMARY: {project_summary}",
+                "memory_type": "context",
+                "importance": 0.8,
+                "tags": sorted(set(base_tags + ["reflection", "summary"])),
+                "agent_id": agent_id,
+            }
+        )
+    for change in payload.get("changes", [])[:3]:
+        if str(change).strip():
+            durable_memories.append(
+                {
+                    "content": f"CHANGE MEMORY: {str(change).strip()}",
+                    "memory_type": "general",
+                    "importance": 0.72,
+                    "tags": sorted(set(base_tags + ["reflection", "change"])),
+                    "agent_id": agent_id,
+                }
+            )
+    if working_memory:
+        durable_memories.append(
+            {
+                "content": f"WORKING MEMORY LINK: {working_memory[0]}",
+                "memory_type": "context",
+                "importance": 0.68,
+                "tags": sorted(set(base_tags + ["reflection", "working-memory"])),
+                "agent_id": agent_id,
+            }
+        )
+
+    decisions = []
+    for item in payload.get("decisions", [])[:5]:
+        title = str(item.get("title", "")).strip()
+        decision = str(item.get("decision", "")).strip()
+        if title and decision:
+            decisions.append(
+                {
+                    "title": title,
+                    "decision": decision,
+                    "rationale": str(item.get("rationale", "")).strip(),
+                    "tags": base_tags,
+                    "agent_id": agent_id,
+                }
+            )
+
+    errors = []
+    for item in payload.get("errors", [])[:5]:
+        description = str(item.get("description", "")).strip()
+        solution = str(item.get("solution", "")).strip()
+        if description and solution:
+            errors.append(
+                {
+                    "error_signature": str(item.get("error_signature", "")).strip() or description[:100],
+                    "description": description,
+                    "solution": solution,
+                    "tags": base_tags,
+                }
+            )
+
+    tasks = []
+    for item in payload.get("follow_ups", [])[:5]:
+        title = str(item.get("title", "")).strip()
+        if title:
+            tasks.append(
+                {
+                    "title": title,
+                    "state": str(item.get("state", "pending")).strip().lower() or "pending",
+                    "details": str(item.get("details", "")).strip(),
+                    "agent_id": agent_id,
+                }
+            )
+
+    return {
+        "project_summary": project_summary,
+        "durable_memories": durable_memories[:5],
+        "decisions": decisions,
+        "errors": errors,
+        "tasks": tasks,
+    }
 
 
 async def retry_async(label: str, callback, attempts: int = 20, delay: float = 2.0):
@@ -143,6 +242,8 @@ async def mem0_search(payload: dict[str, Any]) -> list[str]:
 
 
 async def deepseek_reflection(payload: dict[str, Any], working_memory: list[str]) -> dict[str, Any]:
+    if AI_MEMORY_TEST_MODE:
+        return deterministic_reflection(payload, working_memory)
     if not has_real_secret(DEEPSEEK_API_KEY):
         raise RuntimeError("deepseek_not_configured")
 
@@ -571,6 +672,7 @@ async def run_loop():
 
 async def startup():
     global pg_pool, redis_client, http_client, deepseek_client
+    global TEST_NOW_OVERRIDE
 
     async def init_postgres():
         return await asyncpg.create_pool(POSTGRES_URL, min_size=1, max_size=4, command_timeout=30)
@@ -589,6 +691,8 @@ async def startup():
     pg_pool = await retry_async("postgres", init_postgres)
     redis_client = await retry_async("redis", init_redis)
     http_client = await retry_async("api-server", init_api)
+    if AI_MEMORY_TEST_MODE and AI_MEMORY_TEST_NOW:
+        TEST_NOW_OVERRIDE = now_utc()
     deepseek_client = AsyncOpenAI(api_key=DEEPSEEK_API_KEY or "change-me", base_url=DEEPSEEK_BASE_URL)
     await update_heartbeat()
     logger.info("Reflection worker listo")

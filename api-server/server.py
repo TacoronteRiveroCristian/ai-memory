@@ -6,6 +6,7 @@ import math
 import os
 import re
 import uuid
+from collections import Counter
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -50,14 +51,25 @@ DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.co
 WORKER_HEARTBEAT_KEY = os.environ.get("WORKER_HEARTBEAT_KEY", "reflection_worker:heartbeat")
 WORKER_HEARTBEAT_MAX_AGE = int(os.environ.get("WORKER_HEARTBEAT_MAX_AGE_SECONDS", "120"))
 MEM0_INGEST_TIMEOUT_SECONDS = float(os.environ.get("MEM0_INGEST_TIMEOUT_SECONDS", "90"))
+PROJECT_CONTEXT_WORKING_MEMORY_TIMEOUT_SECONDS = float(
+    os.environ.get("PROJECT_CONTEXT_WORKING_MEMORY_TIMEOUT_SECONDS", "2.0")
+)
+PROJECT_CONTEXT_WORKING_MEMORY_LIMIT = max(1, int(os.environ.get("PROJECT_CONTEXT_WORKING_MEMORY_LIMIT", "3")))
+PROJECT_CONTEXT_WORKING_MEMORY_USE_GRAPH = os.environ.get(
+    "PROJECT_CONTEXT_WORKING_MEMORY_USE_GRAPH", "false"
+).strip().lower() in {"1", "true", "yes", "on"}
 COLLECTION_NAME = "memories"
 VECTOR_DIM = 1536
 VALID_SEARCH_SCOPES = {"project", "bridged", "global"}
 VALID_RELATION_TYPES = {"same_concept", "extends", "supports", "applies_to", "derived_from", "contradicts"}
 RELATION_ACTIVE_THRESHOLD = 0.18
 TAG_NORMALIZE_RE = re.compile(r"[^a-z0-9/_-]+")
+TOKEN_RE = re.compile(r"[a-z0-9_/-]+")
 AUTO_LINK_CANDIDATE_LIMIT = 6
 AUTO_LINK_SCORE_THRESHOLD = 0.78
+AI_MEMORY_TEST_MODE = os.environ.get("AI_MEMORY_TEST_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
+AI_MEMORY_TEST_NOW = os.environ.get("AI_MEMORY_TEST_NOW", "").strip()
+EMBEDDING_CACHE_NAMESPACE = "embed:test:v2" if AI_MEMORY_TEST_MODE else f"embed:live:{EMBEDDING_MODEL}"
 
 qdrant: Optional[AsyncQdrantClient] = None
 pg_pool: Optional[asyncpg.Pool] = None
@@ -65,6 +77,7 @@ redis_client: Optional[aioredis.Redis] = None
 openai_client: Optional[AsyncOpenAI] = None
 deepseek_client: Optional[AsyncOpenAI] = None
 http_client: Optional[httpx.AsyncClient] = None
+TEST_NOW_OVERRIDE: Optional[datetime] = None
 
 app = FastAPI(title="AI Memory Brain", version="1.2.0")
 app.add_middleware(
@@ -177,8 +190,31 @@ class BridgeProjectsRequest(BaseModel):
     created_by: str = "api"
 
 
+class StructuredSearchRequest(SearchMemoryRequest):
+    register_access: bool = False
+
+
+class TestClockRequest(BaseModel):
+    now: Optional[str] = None
+
+
+def parse_datetime(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def now_utc() -> datetime:
+    if TEST_NOW_OVERRIDE is not None:
+        return TEST_NOW_OVERRIDE
+    if AI_MEMORY_TEST_MODE and AI_MEMORY_TEST_NOW:
+        return parse_datetime(AI_MEMORY_TEST_NOW)
+    return datetime.now(timezone.utc)
+
+
 def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return now_utc().isoformat()
 
 
 def has_real_secret(value: Optional[str]) -> bool:
@@ -216,6 +252,58 @@ def canonical_json(value: Any) -> str:
 
 def digest_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def tokenize_text(text: str) -> list[str]:
+    return TOKEN_RE.findall(str(text).lower())
+
+
+def set_test_now_override(value: Optional[str]):
+    global TEST_NOW_OVERRIDE
+    if not value:
+        TEST_NOW_OVERRIDE = None
+        return
+    TEST_NOW_OVERRIDE = parse_datetime(value)
+
+
+def deterministic_embedding(text: str) -> list[float]:
+    vector = [0.0] * VECTOR_DIM
+    tokens = tokenize_text(text)
+    if not tokens:
+        tokens = ["__empty__"]
+    for token, count in Counter(tokens).items():
+        digest = hashlib.sha256(token.encode("utf-8")).digest()
+        for slot_offset, sign_offset, multiplier in ((0, 6, 1.0), (2, 7, 0.6), (4, 8, 0.3)):
+            slot = int.from_bytes(digest[slot_offset : slot_offset + 2], "big") % VECTOR_DIM
+            sign = 1.0 if digest[sign_offset] % 2 == 0 else -1.0
+            vector[slot] += sign * count * multiplier
+    norm = math.sqrt(sum(component * component for component in vector)) or 1.0
+    return [round(component / norm, 8) for component in vector]
+
+
+def compute_text_overlap(left_text: str, right_text: str) -> float:
+    left_tokens = set(tokenize_text(left_text))
+    right_tokens = set(tokenize_text(right_text))
+    if not left_tokens or not right_tokens:
+        return 0.0
+    overlap = len(left_tokens & right_tokens)
+    baseline = max(1, min(len(left_tokens), len(right_tokens)))
+    return round(clamp01(overlap / baseline), 4)
+
+
+def format_search_results(query: str, results: list[dict[str, Any]]) -> str:
+    if not results:
+        return f"No encontre memorias relevantes para '{query}'"
+    lines = [f"{len(results)} memorias relevantes para '{query}':"]
+    for index, result in enumerate(results, 1):
+        lines.append(
+            f"[{index}] score={result['semantic_score']:.3f} "
+            f"hybrid={result['hybrid_score']:.3f} "
+            f"type={result['memory_type']} "
+            f"project={result['project']} "
+            f"content={result['content'][:260]}"
+        )
+    return "\n".join(lines)
 
 
 def build_session_summary_document(payload: SessionSummaryRequest) -> str:
@@ -350,7 +438,7 @@ def compute_recency_frequency(access_count: int, last_accessed_at: Optional[date
         return round(0.6 * frequency, 4)
     age_days = max(
         0.0,
-        (datetime.now(timezone.utc) - last_accessed_at.astimezone(timezone.utc)).total_seconds() / 86400.0,
+        (now_utc() - last_accessed_at.astimezone(timezone.utc)).total_seconds() / 86400.0,
     )
     recency = clamp01(1.0 - min(age_days, 30.0) / 30.0)
     return round(clamp01(0.6 * frequency + 0.4 * recency), 4)
@@ -510,14 +598,17 @@ async def retry_async(label: str, callback, attempts: int = 20, delay: float = 2
 
 
 async def get_embedding(text: str) -> list[float]:
-    cache_key = "embed:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+    cache_key = EMBEDDING_CACHE_NAMESPACE + ":" + hashlib.sha256(text.encode("utf-8")).hexdigest()
     if redis_client:
         cached = await redis_client.get(cache_key)
         if cached:
             return json.loads(cached)
 
-    response = await openai_client.embeddings.create(input=text, model=EMBEDDING_MODEL)
-    embedding = response.data[0].embedding
+    if AI_MEMORY_TEST_MODE:
+        embedding = deterministic_embedding(text)
+    else:
+        response = await openai_client.embeddings.create(input=text, model=EMBEDDING_MODEL)
+        embedding = response.data[0].embedding
 
     if redis_client:
         await redis_client.setex(cache_key, 3600, json.dumps(embedding))
@@ -635,12 +726,13 @@ async def upsert_memory_relation(
     relation_type = validate_relation_type(relation_type)
     source_id, target_id = canonical_memory_pair(source_memory_id, target_memory_id)
     active = origin == "manual" or weight >= RELATION_ACTIVE_THRESHOLD
+    current_time = now_utc()
     async with pg_pool.acquire() as conn:
         row = await conn.fetchrow(
             """
             INSERT INTO memory_relations
             (source_memory_id, target_memory_id, relation_type, weight, origin, evidence_json, reinforcement_count, last_activated_at, active)
-            VALUES ($1, $2, $3, $4, $5, $6::jsonb, 1, CASE WHEN $7 THEN NOW() ELSE NULL END, $8)
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb, 1, CASE WHEN $7 THEN $8::timestamptz ELSE NULL END, $9)
             ON CONFLICT (source_memory_id, target_memory_id, relation_type) DO UPDATE
             SET weight = CASE
                     WHEN memory_relations.origin = 'manual' THEN GREATEST(memory_relations.weight, EXCLUDED.weight)
@@ -653,14 +745,14 @@ async def upsert_memory_relation(
                 evidence_json = COALESCE(memory_relations.evidence_json, '{}'::jsonb) || EXCLUDED.evidence_json,
                 reinforcement_count = memory_relations.reinforcement_count + 1,
                 last_activated_at = CASE
-                    WHEN $7 THEN NOW()
+                    WHEN $7 THEN $8::timestamptz
                     ELSE memory_relations.last_activated_at
                 END,
                 active = CASE
                     WHEN memory_relations.origin = 'manual' THEN TRUE
-                    ELSE (LEAST(1.0, GREATEST(memory_relations.weight, EXCLUDED.weight)) >= $9)
+                    ELSE (LEAST(1.0, GREATEST(memory_relations.weight, EXCLUDED.weight)) >= $10)
                 END,
-                updated_at = NOW()
+                updated_at = $8::timestamptz
             RETURNING id, source_memory_id, target_memory_id, relation_type, weight, origin, reinforcement_count, active
             """,
             uuid.UUID(source_id),
@@ -670,6 +762,7 @@ async def upsert_memory_relation(
             origin,
             json.dumps(evidence or {}, ensure_ascii=False),
             mark_activated,
+            current_time,
             active,
             RELATION_ACTIVE_THRESHOLD,
         )
@@ -689,6 +782,7 @@ async def upsert_memory_relation(
 async def decay_project_relations(project_name: str, stale_days: int = 21) -> int:
     if not pg_pool or not project_name:
         return 0
+    current_time = now_utc()
     async with pg_pool.acquire() as conn:
         result = await conn.execute(
             """
@@ -704,17 +798,18 @@ async def decay_project_relations(project_name: str, stale_days: int = 21) -> in
                     WHEN mr.origin = 'manual' THEN TRUE
                     ELSE (GREATEST(0.0, mr.weight - 0.03) >= $2)
                 END,
-                updated_at = NOW()
+                updated_at = $4::timestamptz
             WHERE mr.origin <> 'manual'
               AND (
                   mr.source_memory_id IN (SELECT id FROM project_memories)
                   OR mr.target_memory_id IN (SELECT id FROM project_memories)
               )
-              AND COALESCE(mr.last_activated_at, mr.created_at) < NOW() - (($3::text || ' days')::interval)
+              AND COALESCE(mr.last_activated_at, mr.created_at) < ($4::timestamptz - make_interval(days => $3::int))
             """,
             project_name,
             RELATION_ACTIVE_THRESHOLD,
             stale_days,
+            current_time,
         )
     return int(result.split()[-1])
 
@@ -722,6 +817,7 @@ async def decay_project_relations(project_name: str, stale_days: int = 21) -> in
 async def register_memory_access(results: list[dict[str, Any]]):
     if not pg_pool or not results:
         return
+    current_time = now_utc()
     top_ids = [uuid.UUID(item["id"]) for item in results[:4]]
     async with pg_pool.acquire() as conn:
         for item in results:
@@ -729,15 +825,16 @@ async def register_memory_access(results: list[dict[str, Any]]):
                 """
                 UPDATE memory_log
                 SET access_count = access_count + 1,
-                    last_accessed_at = NOW(),
-                    activation_score = GREATEST(COALESCE(activation_score, 0), $2),
+                    last_accessed_at = $2,
+                    activation_score = GREATEST(COALESCE(activation_score, 0), $3),
                     stability_score = CASE
                         WHEN manual_pin THEN 1.0
-                        ELSE LEAST(1.0, GREATEST(COALESCE(stability_score, 0.3), $3))
+                        ELSE LEAST(1.0, GREATEST(COALESCE(stability_score, 0.3), $4))
                     END
                 WHERE id = $1
                 """,
                 uuid.UUID(item["id"]),
+                current_time,
                 float(item["hybrid_score"]),
                 clamp01(max(float(item["hybrid_score"]), float(item.get("stability_score", 0.5)))),
             )
@@ -746,17 +843,18 @@ async def register_memory_access(results: list[dict[str, Any]]):
                 """
                 UPDATE memory_relations
                 SET reinforcement_count = reinforcement_count + 1,
-                    last_activated_at = NOW(),
+                    last_activated_at = $2,
                     weight = CASE
                         WHEN origin = 'manual' THEN weight
                         ELSE LEAST(1.0, weight + 0.02)
                     END,
                     active = TRUE,
-                    updated_at = NOW()
+                    updated_at = $2
                 WHERE source_memory_id = ANY($1::uuid[])
                   AND target_memory_id = ANY($1::uuid[])
                 """,
                 top_ids,
+                current_time,
             )
 
 
@@ -850,6 +948,8 @@ async def classify_relation_with_llm(
     semantic_score: float,
     shared_tags: list[str],
 ) -> Optional[dict[str, Any]]:
+    if AI_MEMORY_TEST_MODE:
+        return None
     if not deepseek_client or not has_real_secret(DEEPSEEK_API_KEY):
         return None
     prompt = canonical_json(
@@ -915,19 +1015,35 @@ def classify_relation_heuristic(
     source_text = str(source.get("content", "")).lower()
     candidate_text = str(candidate.get("content", "")).lower()
     same_type = source.get("memory_type") == candidate.get("memory_type")
+    lexical_overlap = compute_text_overlap(source_text, candidate_text)
+    cross_project = source.get("project") != candidate.get("project")
     if semantic_score >= 0.95 and (same_type or shared_tags):
         return {"relation_type": "same_concept", "weight": clamp01(semantic_score), "reason": "high_semantic_overlap"}
+    if shared_tags and same_type and lexical_overlap >= 0.45:
+        relation_type = "derived_from" if cross_project else "same_concept"
+        return {
+            "relation_type": relation_type,
+            "weight": clamp01(max(semantic_score, 0.82 if cross_project else 0.86)),
+            "reason": "lexical_overlap_shared_tags",
+        }
     if semantic_score >= 0.9 and shared_tags:
         return {"relation_type": "extends", "weight": clamp01(semantic_score - 0.05), "reason": "shared_tags"}
     if any(token in source_text for token in ["builds on", "extends", "expands"]) or any(
         token in candidate_text for token in ["builds on", "extends", "expands"]
     ):
         return {"relation_type": "extends", "weight": clamp01(max(0.7, semantic_score)), "reason": "extension_language"}
+    if shared_tags and lexical_overlap >= 0.35:
+        relation_type = "derived_from" if cross_project else "supports"
+        return {
+            "relation_type": relation_type,
+            "weight": clamp01(max(semantic_score, 0.74 if cross_project else 0.78)),
+            "reason": "moderate_lexical_overlap",
+        }
     if same_type and shared_tags and semantic_score >= 0.84:
         return {"relation_type": "supports", "weight": clamp01(semantic_score - 0.04), "reason": "same_type_shared_tags"}
     if shared_tags and semantic_score >= 0.82:
         return {"relation_type": "applies_to", "weight": clamp01(semantic_score - 0.08), "reason": "tag_supported_similarity"}
-    if semantic_score >= 0.88 and source.get("project") != candidate.get("project"):
+    if semantic_score >= 0.88 and cross_project:
         return {"relation_type": "derived_from", "weight": clamp01(semantic_score - 0.06), "reason": "cross_project_reuse"}
     return None
 
@@ -944,6 +1060,7 @@ async def auto_link_memory(
         return []
     normalized_tags = normalize_tags(tags)
     allowed_projects = set(await resolve_scope_projects(project, "bridged"))
+    auto_link_score_threshold = 0.35 if AI_MEMORY_TEST_MODE else AUTO_LINK_SCORE_THRESHOLD
     source_memory = {
         "id": memory_id,
         "project": project,
@@ -958,7 +1075,7 @@ async def auto_link_memory(
         limit=AUTO_LINK_CANDIDATE_LIMIT,
         scope="bridged",
         tags="",
-        score_threshold=AUTO_LINK_SCORE_THRESHOLD,
+        score_threshold=auto_link_score_threshold,
         exclude_memory_ids=[memory_id],
     )
     created: list[dict[str, Any]] = []
@@ -1081,6 +1198,82 @@ async def get_related_ideas(project_name: str, limit: int = 5) -> list[str]:
     return lines
 
 
+async def get_relations_for_memory(memory_id: str) -> list[dict[str, Any]]:
+    if not pg_pool:
+        return []
+    async with pg_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT
+                mr.id,
+                mr.source_memory_id,
+                mr.target_memory_id,
+                mr.relation_type,
+                mr.weight,
+                mr.origin,
+                mr.evidence_json,
+                mr.reinforcement_count,
+                mr.last_activated_at,
+                mr.active,
+                src.summary AS source_summary,
+                dst.summary AS target_summary,
+                src_p.name AS source_project,
+                dst_p.name AS target_project
+            FROM memory_relations mr
+            JOIN memory_log src ON src.id = mr.source_memory_id
+            JOIN memory_log dst ON dst.id = mr.target_memory_id
+            LEFT JOIN projects src_p ON src_p.id = src.project_id
+            LEFT JOIN projects dst_p ON dst_p.id = dst.project_id
+            WHERE mr.source_memory_id = $1::uuid OR mr.target_memory_id = $1::uuid
+            ORDER BY mr.weight DESC, mr.reinforcement_count DESC, mr.updated_at DESC
+            """,
+            uuid.UUID(memory_id),
+        )
+    relations: list[dict[str, Any]] = []
+    for row in rows:
+        serialized = serialize_row(row) or {}
+        other_id = serialized["target_memory_id"] if serialized["source_memory_id"] == memory_id else serialized["source_memory_id"]
+        other_summary = serialized["target_summary"] if serialized["source_memory_id"] == memory_id else serialized["source_summary"]
+        other_project = serialized["target_project"] if serialized["source_memory_id"] == memory_id else serialized["source_project"]
+        serialized["other_memory_id"] = other_id
+        serialized["other_summary"] = other_summary
+        serialized["other_project"] = other_project
+        relations.append(serialized)
+    return relations
+
+
+async def list_project_bridges(project: str) -> list[dict[str, Any]]:
+    if not pg_pool:
+        return []
+    async with pg_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT
+                pb.id,
+                pb.reason,
+                pb.active,
+                pb.created_by,
+                pb.created_at,
+                pb.updated_at,
+                left_p.name AS project,
+                right_p.name AS related_project
+            FROM project_bridges pb
+            JOIN projects left_p ON left_p.id = pb.project_id
+            JOIN projects right_p ON right_p.id = pb.related_project_id
+            WHERE left_p.name = $1 OR right_p.name = $1
+            ORDER BY pb.updated_at DESC, pb.created_at DESC
+            """,
+            project,
+        )
+    bridges: list[dict[str, Any]] = []
+    for row in rows:
+        serialized = serialize_row(row) or {}
+        if serialized.get("related_project") == project:
+            serialized["project"], serialized["related_project"] = serialized["related_project"], serialized["project"]
+        bridges.append(serialized)
+    return bridges
+
+
 async def apply_session_plasticity(payload: SessionSummaryRequest) -> dict[str, Any]:
     queries = [payload.summary, payload.goal, payload.outcome]
     queries.extend(payload.changes[:4])
@@ -1130,16 +1323,17 @@ async def mem0_health() -> bool:
 async def mem0_search_context(query: str, project: str, agent_id: Optional[str] = None, limit: int = 5) -> list[str]:
     if not http_client or not MEM0_URL:
         return []
+    timeout_seconds = max(0.2, PROJECT_CONTEXT_WORKING_MEMORY_TIMEOUT_SECONDS)
     payload: dict[str, Any] = {
         "query": query,
         "user_id": project,
-        "limit": limit,
-        "enable_graph": True,
+        "limit": max(1, limit),
+        "enable_graph": PROJECT_CONTEXT_WORKING_MEMORY_USE_GRAPH,
     }
     if agent_id:
         payload["agent_id"] = agent_id
     try:
-        response = await http_client.post(f"{MEM0_URL}/search", json=payload, timeout=10.0)
+        response = await http_client.post(f"{MEM0_URL}/search", json=payload, timeout=timeout_seconds)
         response.raise_for_status()
         data = response.json()
     except Exception as exc:
@@ -1288,7 +1482,7 @@ async def get_worker_heartbeat_state() -> tuple[bool, Optional[str]]:
         heartbeat_dt = datetime.fromisoformat(heartbeat_value)
     except Exception:
         return False, heartbeat_value
-    age = (datetime.now(timezone.utc) - heartbeat_dt.astimezone(timezone.utc)).total_seconds()
+    age = (now_utc() - heartbeat_dt.astimezone(timezone.utc)).total_seconds()
     return age <= WORKER_HEARTBEAT_MAX_AGE, heartbeat_dt.astimezone(timezone.utc).isoformat()
 
 
@@ -1404,8 +1598,9 @@ async def ready_status() -> dict:
         "mem0": False,
         "reflection_worker": worker_healthy,
         "worker_last_heartbeat": worker_last_heartbeat,
-        "openai_configured": has_real_secret(OPENAI_API_KEY),
-        "deepseek_configured": has_real_secret(DEEPSEEK_API_KEY),
+        "openai_configured": AI_MEMORY_TEST_MODE or has_real_secret(OPENAI_API_KEY),
+        "deepseek_configured": AI_MEMORY_TEST_MODE or has_real_secret(DEEPSEEK_API_KEY),
+        "test_mode": AI_MEMORY_TEST_MODE,
     }
 
     if pg_pool:
@@ -1585,16 +1780,7 @@ async def search_memory(
         if not results:
             return f"No encontre memorias relevantes para '{query}'"
         await register_memory_access(results)
-        lines = [f"{len(results)} memorias relevantes para '{query}':"]
-        for index, result in enumerate(results, 1):
-            lines.append(
-                f"[{index}] score={result['semantic_score']:.3f} "
-                f"hybrid={result['hybrid_score']:.3f} "
-                f"type={result['memory_type']} "
-                f"project={result['project']} "
-                f"content={result['content'][:260]}"
-            )
-        return "\n".join(lines)
+        return format_search_results(query, results)
     except Exception as exc:
         logger.exception("search_memory fallo")
         return f"ERROR {exc}"
@@ -1662,29 +1848,56 @@ async def get_project_context(project_name: str, agent_id: Optional[str] = None,
                         [f"- {row['title']}: {row['decision']} | rationale={row['rationale'] or ''}" for row in decisions]
                     )
 
-        working_memory = await mem0_search_context(
-            query=f"recent work, active context, open loops, errors and decisions for project {project_name}",
-            project=project_name,
-            agent_id=agent_id,
-            limit=5,
-        )
-        if working_memory:
-            output.append("WORKING MEMORY")
-            output.extend(working_memory)
-
-        semantic = await search_memory(
-            f"context architecture overview {project_name}",
+        semantic_query = f"context architecture overview {project_name}"
+        semantic_future = structured_search_memories(
+            query=semantic_query,
             project=project_name,
             limit=5,
             scope="project",
+            score_threshold=0.35,
         )
+        working_memory_future = (
+            mem0_search_context(
+                query=f"recent work, active context, open loops, errors and decisions for project {project_name}",
+                project=project_name,
+                agent_id=agent_id,
+                limit=PROJECT_CONTEXT_WORKING_MEMORY_LIMIT,
+            )
+            if agent_id
+            else asyncio.sleep(0, result=[])
+        )
+        related_ideas_future = get_related_ideas(project_name, limit=5) if include_related else asyncio.sleep(0, result=[])
+        semantic_result, working_memory_result, related_ideas_result = await asyncio.gather(
+            semantic_future,
+            working_memory_future,
+            related_ideas_future,
+            return_exceptions=True,
+        )
+
+        semantic_results: list[dict[str, Any]] = []
+        if isinstance(semantic_result, Exception):
+            logger.warning("Busqueda semantica fallo en get_project_context para %s: %s", project_name, semantic_result)
+        else:
+            semantic_results = semantic_result
+            if semantic_results:
+                await register_memory_access(semantic_results)
+
+        if isinstance(working_memory_result, Exception):
+            logger.warning("Working memory fallo en get_project_context para %s: %s", project_name, working_memory_result)
+            working_memory_result = []
+        if working_memory_result:
+            output.append("WORKING MEMORY")
+            output.extend(working_memory_result)
+
         output.append("MEMORY SEARCH")
-        output.append(semantic)
+        output.append(format_search_results(semantic_query, semantic_results))
         if include_related:
-            related_ideas = await get_related_ideas(project_name, limit=5)
-            if related_ideas:
+            if isinstance(related_ideas_result, Exception):
+                logger.warning("Related ideas fallo en get_project_context para %s: %s", project_name, related_ideas_result)
+                related_ideas_result = []
+            if related_ideas_result:
                 output.append("RELATED IDEAS")
-                output.extend(related_ideas)
+                output.extend(related_ideas_result)
         return "\n".join(output)
     except Exception as exc:
         logger.exception("get_project_context fallo")
@@ -2118,7 +2331,7 @@ async def delete_memory(memory_id: str) -> str:
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "timestamp": now_iso()}
+    return {"status": "ok", "timestamp": now_iso(), "test_mode": AI_MEMORY_TEST_MODE}
 
 
 @app.get("/ready")
@@ -2155,6 +2368,47 @@ async def api_search_memory(payload: SearchMemoryRequest):
     if result.startswith("ERROR"):
         raise HTTPException(status_code=500, detail=result)
     return {"result": result}
+
+
+@app.post("/api/search/structured")
+async def api_search_memory_structured(payload: StructuredSearchRequest):
+    try:
+        results = await structured_search_memories(
+            query=payload.query,
+            project=payload.project,
+            memory_type=payload.memory_type,
+            limit=payload.limit,
+            scope=payload.scope,
+            tags=payload.tags,
+            score_threshold=0.35,
+        )
+        if payload.register_access:
+            await register_memory_access(results)
+        return {
+            "query": payload.query,
+            "scope": payload.scope,
+            "project": payload.project,
+            "count": len(results),
+            "results": [
+                {
+                    "memory_id": item["id"],
+                    "project": item["project"],
+                    "memory_type": item["memory_type"],
+                    "semantic_score": item["semantic_score"],
+                    "hybrid_score": item["hybrid_score"],
+                    "relation_weight": item["relation_weight"],
+                    "recency_frequency": item["recency_frequency"],
+                    "tag_overlap": item["tag_overlap"],
+                    "tags": item["tags"],
+                    "content": item["content"],
+                    "manual_pin": item["manual_pin"],
+                }
+                for item in results
+            ],
+        }
+    except Exception as exc:
+        logger.exception("api_search_memory_structured fallo")
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @app.get("/api/project-context")
@@ -2205,6 +2459,15 @@ async def api_link_memories(payload: LinkMemoriesRequest):
     return {"result": result}
 
 
+@app.get("/api/relations")
+async def api_list_relations(memory_id: str):
+    try:
+        return {"memory_id": memory_id, "relations": await get_relations_for_memory(memory_id)}
+    except Exception as exc:
+        logger.exception("api_list_relations fallo")
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @app.post("/api/project-bridges")
 async def api_bridge_projects(payload: BridgeProjectsRequest):
     try:
@@ -2212,6 +2475,15 @@ async def api_bridge_projects(payload: BridgeProjectsRequest):
         return {"result": "OK", "bridge": bridge}
     except Exception as exc:
         logger.exception("api_bridge_projects fallo")
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/project-bridges")
+async def api_list_project_bridges(project: str):
+    try:
+        return {"project": project, "bridges": await list_project_bridges(project)}
+    except Exception as exc:
+        logger.exception("api_list_project_bridges fallo")
         raise HTTPException(status_code=400, detail=str(exc))
 
 
@@ -2240,6 +2512,18 @@ async def api_apply_session_plasticity(payload: SessionSummaryRequest):
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+@app.post("/api/test/clock")
+async def api_test_clock(payload: TestClockRequest):
+    if not AI_MEMORY_TEST_MODE:
+        raise HTTPException(status_code=404, detail="test_mode_disabled")
+    try:
+        set_test_now_override(payload.now)
+        return {"result": "OK", "now": now_iso(), "test_mode": True}
+    except Exception as exc:
+        logger.exception("api_test_clock fallo")
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @app.post("/api/reflections/run")
 async def api_run_reflection():
     result = await queue_manual_reflection()
@@ -2256,6 +2540,8 @@ async def api_reflection_status():
 async def initialize_app_state():
     global pg_pool, redis_client, openai_client, deepseek_client, http_client
     logger.info("Iniciando AI Memory Brain")
+    if AI_MEMORY_TEST_MODE and AI_MEMORY_TEST_NOW:
+        set_test_now_override(AI_MEMORY_TEST_NOW)
     openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
     deepseek_client = AsyncOpenAI(api_key=DEEPSEEK_API_KEY or "change-me", base_url=DEEPSEEK_BASE_URL)
     http_client = httpx.AsyncClient(timeout=10.0)
