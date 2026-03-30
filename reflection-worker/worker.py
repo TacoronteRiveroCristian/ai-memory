@@ -114,6 +114,7 @@ async def mem0_search(payload: dict[str, Any]) -> list[str]:
         "user_id": payload["project"],
         "agent_id": payload["agent_id"],
         "limit": 6,
+        "enable_graph": True,
     }
     try:
         response = await http_client.post(f"{MEM0_URL}/search", json=body, timeout=15.0)
@@ -124,6 +125,7 @@ async def mem0_search(payload: dict[str, Any]) -> list[str]:
         return []
 
     raw_results = data.get("results", data if isinstance(data, list) else [])
+    relations = data.get("relations", []) if isinstance(data, dict) else []
     results: list[str] = []
     for item in raw_results[:6]:
         if isinstance(item, dict):
@@ -134,6 +136,9 @@ async def mem0_search(payload: dict[str, Any]) -> list[str]:
                 results.append(str(memory_text)[:320])
         elif item:
             results.append(str(item)[:320])
+    for relation in relations[:2]:
+        if relation:
+            results.append(f"relation {json.dumps(relation, ensure_ascii=False)[:280]}")
     return results
 
 
@@ -358,7 +363,12 @@ async def process_session(conn: asyncpg.Connection, run_id, row: asyncpg.Record)
         payload = json.loads(payload)
     working_memory = await mem0_search(payload)
     findings = await deepseek_reflection(payload, working_memory)
-    return await promote_findings(conn, run_id, payload, findings)
+    promoted = await promote_findings(conn, run_id, payload, findings)
+    try:
+        await api_call("POST", "/api/plasticity/session", payload)
+    except Exception:
+        logger.exception("Fase de plasticidad fallo para session %s", payload.get("session_id"))
+    return promoted
 
 
 async def claim_pending_sessions(conn: asyncpg.Connection, limit: int = 20) -> list[asyncpg.Record]:
