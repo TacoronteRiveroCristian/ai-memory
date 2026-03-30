@@ -139,6 +139,7 @@ services:
       EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
       DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-reasoner}
+      MEM0_INGEST_TIMEOUT_SECONDS: ${MEM0_INGEST_TIMEOUT_SECONDS:-90}
       API_KEY: ${MEMORY_API_KEY}
       LOG_LEVEL: INFO
       WORKER_HEARTBEAT_KEY: reflection_worker:heartbeat

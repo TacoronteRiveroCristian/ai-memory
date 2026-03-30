@@ -382,6 +382,33 @@ async def claim_pending_sessions(conn: asyncpg.Connection, limit: int = 20) -> l
     )
 
 
+async def recover_interrupted_state(conn: asyncpg.Connection):
+    reset_sessions = await conn.execute(
+        """
+        UPDATE session_summaries
+        SET status = 'pending',
+            last_error = CASE
+                WHEN COALESCE(last_error, '') = '' THEN 'requeued_after_worker_interruption'
+                ELSE LEFT(last_error || ' | requeued_after_worker_interruption', 2000)
+            END
+        WHERE status = 'processing' AND reviewed_at IS NULL
+        """
+    )
+    failed_runs = await conn.execute(
+        """
+        UPDATE reflection_runs
+        SET status = 'failed',
+            finished_at = NOW(),
+            error = CASE
+                WHEN COALESCE(error, '') = '' THEN 'worker_interruption_detected'
+                ELSE LEFT(error || ' | worker_interruption_detected', 2000)
+            END
+        WHERE status = 'running' AND finished_at IS NULL
+        """
+    )
+    logger.info("Recuperacion de estado interrumpido: %s, %s", reset_sessions, failed_runs)
+
+
 async def execute_run(conn: asyncpg.Connection, run_id):
     await conn.execute(
         """
@@ -405,6 +432,7 @@ async def execute_run(conn: asyncpg.Connection, run_id):
             total_inputs += len(claimed)
             for row in claimed:
                 try:
+                    await update_heartbeat()
                     total_promoted += await process_session(conn, run_id, row)
                     await conn.execute(
                         """
@@ -470,6 +498,7 @@ async def handle_manual_runs():
         if not locked:
             return
         try:
+            await recover_interrupted_state(conn)
             while True:
                 run_row = await conn.fetchrow(
                     """
@@ -493,6 +522,7 @@ async def handle_scheduled_run():
         if not locked:
             return
         try:
+            await recover_interrupted_state(conn)
             last_run_at = await conn.fetchval(
                 """
                 SELECT COALESCE(finished_at, started_at)

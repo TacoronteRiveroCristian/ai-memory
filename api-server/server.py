@@ -46,6 +46,7 @@ DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-reasoner")
 WORKER_HEARTBEAT_KEY = os.environ.get("WORKER_HEARTBEAT_KEY", "reflection_worker:heartbeat")
 WORKER_HEARTBEAT_MAX_AGE = int(os.environ.get("WORKER_HEARTBEAT_MAX_AGE_SECONDS", "120"))
+MEM0_INGEST_TIMEOUT_SECONDS = float(os.environ.get("MEM0_INGEST_TIMEOUT_SECONDS", "90"))
 COLLECTION_NAME = "memories"
 VECTOR_DIM = 1536
 
@@ -209,6 +210,49 @@ def build_session_summary_document(payload: SessionSummaryRequest) -> str:
     return "\n".join(lines)
 
 
+def build_session_summary_facts(payload: SessionSummaryRequest) -> list[str]:
+    facts = [
+        f"Summary: {payload.summary}",
+        f"Goal is {payload.goal}",
+        f"Outcome is {payload.outcome}",
+    ]
+
+    facts.extend([f"Change: {item}" for item in payload.changes[:8]])
+    facts.extend(
+        [
+            (
+                f"Decision: {item.title}. {item.decision}. Rationale: {item.rationale}"
+                if item.rationale
+                else f"Decision: {item.title}. {item.decision}."
+            )
+            for item in payload.decisions[:8]
+        ]
+    )
+    facts.extend(
+        [
+            (
+                f"Error: {item.description}. Solution: {item.solution}. Signature: {item.error_signature}"
+                if item.error_signature
+                else f"Error: {item.description}. Solution: {item.solution}."
+            )
+            for item in payload.errors[:8]
+        ]
+    )
+    facts.extend(
+        [
+            (
+                f"Follow-up [{item.state}]: {item.title}. {item.details}"
+                if item.details
+                else f"Follow-up [{item.state}]: {item.title}"
+            )
+            for item in payload.follow_ups[:8]
+        ]
+    )
+    if payload.tags:
+        facts.append(f"Tags: {', '.join(payload.tags)}")
+    return [fact.strip() for fact in facts if fact.strip()]
+
+
 def serialize_row(row: Optional[asyncpg.Record]) -> Optional[dict[str, Any]]:
     if row is None:
         return None
@@ -338,27 +382,62 @@ async def ingest_session_into_mem0(payload: SessionSummaryRequest) -> tuple[bool
     if not http_client or not MEM0_URL:
         return False, "mem0_unavailable"
 
-    body = {
-        "messages": [{"role": "user", "content": build_session_summary_document(payload)}],
-        "user_id": payload.project,
-        "agent_id": payload.agent_id,
-        "run_id": payload.session_id,
-        "metadata": {
-            "project": payload.project,
-            "session_id": payload.session_id,
-            "goal": payload.goal,
-            "outcome": payload.outcome,
-            "tags": payload.tags,
-            "record_type": "session_summary",
-        },
+    metadata = {
+        "project": payload.project,
+        "session_id": payload.session_id,
+        "goal": payload.goal,
+        "outcome": payload.outcome,
+        "tags": payload.tags,
+        "record_type": "session_summary",
     }
-    try:
-        response = await http_client.post(f"{MEM0_URL}/memories", json=body, timeout=25.0)
+
+    async def post_messages(messages: list[str]) -> dict[str, Any]:
+        body = {
+            "messages": [{"role": "user", "content": message} for message in messages],
+            "user_id": payload.project,
+            "agent_id": payload.agent_id,
+            "run_id": payload.session_id,
+            "metadata": metadata,
+        }
+        response = await http_client.post(
+            f"{MEM0_URL}/memories",
+            json=body,
+            timeout=MEM0_INGEST_TIMEOUT_SECONDS,
+        )
         response.raise_for_status()
-        return True, None
+        data = response.json()
+        return data if isinstance(data, dict) else {"results": data}
+
+    def result_count(data: dict[str, Any]) -> int:
+        raw_results = data.get("results", [])
+        return len(raw_results) if isinstance(raw_results, list) else int(bool(raw_results))
+
+    try:
+        summary_result = await post_messages([build_session_summary_document(payload)])
+        summary_added = result_count(summary_result)
+        if summary_added > 0:
+            return True, None
+
+        fallback_added = 0
+        for fact in build_session_summary_facts(payload):
+            fallback_added += result_count(await post_messages([fact]))
+            if fallback_added >= 4:
+                break
+
+        if fallback_added > 0:
+            logger.info(
+                "Mem0 ingesta de sesion %s recuperada con fallback atomico (%s memorias).",
+                payload.session_id,
+                fallback_added,
+            )
+            return True, None
+
+        logger.warning("Mem0 devolvio results vacio para session summary %s", payload.session_id)
+        return False, "mem0_empty_results"
     except Exception as exc:
-        logger.warning("Mem0 no pudo ingerir session summary %s: %s", payload.session_id, exc)
-        return False, str(exc)
+        error_detail = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+        logger.warning("Mem0 no pudo ingerir session summary %s: %s", payload.session_id, error_detail)
+        return False, error_detail
 
 
 async def persist_session_summary(payload: SessionSummaryRequest) -> dict[str, Any]:

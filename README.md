@@ -20,6 +20,7 @@ Comandos útiles:
 ```bash
 docker compose ps
 ./scripts/health_check.sh
+./scripts/smoke_test_local.sh
 ./scripts/backup.sh
 ```
 
