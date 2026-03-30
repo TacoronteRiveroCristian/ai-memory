@@ -39,8 +39,18 @@ class BrainClient:
     def create_memory(self, **payload):
         return self.post("/api/memories", payload)
 
+    def memory_detail(self, memory_id: str):
+        return self.get(f"/api/memories/{memory_id}")
+
     def structured_search(self, **payload):
         return self.post("/api/search/structured", payload)
+
+    def graph_subgraph(self, **payload):
+        return self.post("/api/graph/subgraph", payload)
+
+    def graph_metrics(self, project: Optional[str] = None):
+        params = {"project": project} if project else {}
+        return self.get("/api/graph/metrics", params=params)
 
     def link_memories(self, **payload):
         return self.post("/api/relations", payload)

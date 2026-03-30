@@ -154,6 +154,77 @@ def test_shared_tags_without_semantic_similarity_do_not_create_false_links(brain
     assert find_relation(relations, memory_b) is None
 
 
+def test_graph_subgraph_is_bounded_and_memory_detail_is_available(brain_client, unique_project_name):
+    project = unique_project_name("brain-graph")
+    memory_a = brain_client.create_memory(
+        content="Event sourcing keeps a replayable audit trail and rebuilds projections after failures.",
+        project=project,
+        memory_type="architecture",
+        tags="concept/event-sourcing,pattern/replay,tech/postgres",
+        importance=0.92,
+        agent_id="pytest",
+    )["memory_id"]
+    memory_b = brain_client.create_memory(
+        content="Replayable audit trails with event sourcing let us rebuild projections and recover state reliably.",
+        project=project,
+        memory_type="architecture",
+        tags="concept/event-sourcing,pattern/replay,tech/postgres",
+        importance=0.9,
+        agent_id="pytest",
+    )["memory_id"]
+    brain_client.create_memory(
+        content="A separate UI note about dashboard theming should not appear in the event sourcing search graph.",
+        project=project,
+        memory_type="general",
+        tags="concept/ui,pattern/dashboard",
+        importance=0.6,
+        agent_id="pytest",
+    )
+
+    subgraph = brain_client.graph_subgraph(
+        project=project,
+        mode="search",
+        query="event sourcing replay audit trail rebuild projections",
+        scope="project",
+        tags=["concept/event-sourcing"],
+        node_limit=3,
+        edge_limit=2,
+        include_inactive=False,
+    )
+    assert subgraph["summary"]["node_count"] <= 3
+    assert subgraph["summary"]["edge_count"] <= 2
+    node_ids = {node["memory_id"] for node in subgraph["nodes"]}
+    assert memory_a in node_ids
+    assert memory_b in node_ids
+    assert all(node["project"] == project for node in subgraph["nodes"])
+    assert all(node["memory_type"] == "architecture" for node in subgraph["nodes"])
+    assert all("concept/event-sourcing" in node["tags"] for node in subgraph["nodes"])
+    assert all(edge["source_memory_id"] in node_ids and edge["target_memory_id"] in node_ids for edge in subgraph["edges"])
+
+    focus = brain_client.graph_subgraph(
+        project=project,
+        mode="memory_focus",
+        center_memory_id=memory_a,
+        scope="project",
+        node_limit=3,
+        edge_limit=3,
+        include_inactive=False,
+    )
+    assert any(node["memory_id"] == memory_a for node in focus["nodes"])
+
+    detail = brain_client.memory_detail(memory_a)
+    assert detail["memory"]["memory_id"] == memory_a
+    assert detail["memory"]["project"] == project
+    assert detail["memory"]["prominence"] >= 0.0
+    assert detail["relation_count"] >= 1
+
+    metrics = brain_client.graph_metrics(project=project)
+    assert metrics["project"] == project
+    assert metrics["memory_count"] >= 3
+    assert metrics["active_relation_count"] >= 1
+    assert metrics["hot_memory_count"] >= 1
+
+
 def test_plasticity_reinforces_auto_relations_and_preserves_manual_links(brain_client, unique_project_name):
     project = unique_project_name("brain-plasticity")
     brain_client.set_test_clock("2030-01-01T00:00:00+00:00")
@@ -220,6 +291,8 @@ def test_plasticity_reinforces_auto_relations_and_preserves_manual_links(brain_c
     brain_client.set_test_clock("2030-02-20T00:00:00+00:00")
     plasticity = brain_client.apply_session_plasticity(**minimal_session_payload(project))
     assert plasticity["decayed_relations"] >= 1
+    assert plasticity["reinforced_pairs"] >= 0
+    assert "expanded_links" in plasticity
 
     decayed_auto = find_relation(brain_client.relations(auto_a)["relations"], auto_b)
     assert decayed_auto is not None

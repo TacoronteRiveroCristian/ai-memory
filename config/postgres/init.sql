@@ -150,6 +150,9 @@ CREATE INDEX IF NOT EXISTS idx_reflection_promotions_run ON reflection_promotion
 CREATE INDEX IF NOT EXISTS idx_memory_relations_source ON memory_relations(source_memory_id, weight DESC);
 CREATE INDEX IF NOT EXISTS idx_memory_relations_target ON memory_relations(target_memory_id, weight DESC);
 CREATE INDEX IF NOT EXISTS idx_memory_relations_active ON memory_relations(active, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_memory_relations_active_source ON memory_relations(source_memory_id, weight DESC, updated_at DESC) WHERE active = TRUE;
+CREATE INDEX IF NOT EXISTS idx_memory_relations_active_target ON memory_relations(target_memory_id, weight DESC, updated_at DESC) WHERE active = TRUE;
+CREATE INDEX IF NOT EXISTS idx_memory_log_hotspots ON memory_log(project_id, manual_pin DESC, activation_score DESC, stability_score DESC, last_accessed_at DESC, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_project_bridges_project ON project_bridges(project_id, active);
 CREATE INDEX IF NOT EXISTS idx_project_bridges_related ON project_bridges(related_project_id, active);
 

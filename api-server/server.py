@@ -62,6 +62,7 @@ COLLECTION_NAME = "memories"
 VECTOR_DIM = 1536
 VALID_SEARCH_SCOPES = {"project", "bridged", "global"}
 VALID_RELATION_TYPES = {"same_concept", "extends", "supports", "applies_to", "derived_from", "contradicts"}
+VALID_GRAPH_MODES = {"project_hot", "search", "memory_focus"}
 RELATION_ACTIVE_THRESHOLD = 0.18
 TAG_NORMALIZE_RE = re.compile(r"[^a-z0-9/_-]+")
 TOKEN_RE = re.compile(r"[a-z0-9_/-]+")
@@ -196,6 +197,21 @@ class StructuredSearchRequest(SearchMemoryRequest):
 
 class TestClockRequest(BaseModel):
     now: Optional[str] = None
+
+
+class GraphSubgraphRequest(BaseModel):
+    project: Optional[str] = None
+    mode: str = "project_hot"
+    query: str = ""
+    center_memory_id: str = ""
+    scope: str = "project"
+    memory_type: Optional[str] = None
+    tags: list[str] = Field(default_factory=list)
+    depth: int = Field(default=1, ge=1, le=2)
+    node_limit: int = Field(default=32, ge=1, le=80)
+    edge_limit: int = Field(default=96, ge=1, le=200)
+    min_weight: float = Field(default=RELATION_ACTIVE_THRESHOLD, ge=0.0, le=1.0)
+    include_inactive: bool = False
 
 
 def parse_datetime(value: str) -> datetime:
@@ -553,6 +569,9 @@ async def run_schema_migrations():
         "CREATE INDEX IF NOT EXISTS idx_memory_relations_source ON memory_relations(source_memory_id, weight DESC)",
         "CREATE INDEX IF NOT EXISTS idx_memory_relations_target ON memory_relations(target_memory_id, weight DESC)",
         "CREATE INDEX IF NOT EXISTS idx_memory_relations_active ON memory_relations(active, updated_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_memory_relations_active_source ON memory_relations(source_memory_id, weight DESC, updated_at DESC) WHERE active = TRUE",
+        "CREATE INDEX IF NOT EXISTS idx_memory_relations_active_target ON memory_relations(target_memory_id, weight DESC, updated_at DESC) WHERE active = TRUE",
+        "CREATE INDEX IF NOT EXISTS idx_memory_log_hotspots ON memory_log(project_id, manual_pin DESC, activation_score DESC, stability_score DESC, last_accessed_at DESC, created_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_project_bridges_project ON project_bridges(project_id, active)",
         "CREATE INDEX IF NOT EXISTS idx_project_bridges_related ON project_bridges(related_project_id, active)",
         "DROP TRIGGER IF EXISTS update_memory_relations_updated_at ON memory_relations",
@@ -687,6 +706,66 @@ async def fetch_memory_records(memory_ids: list[str]) -> dict[str, dict[str, Any
     return records
 
 
+def serialize_memory_record(record: dict[str, Any]) -> dict[str, Any]:
+    serialized: dict[str, Any] = {}
+    for key, value in record.items():
+        if isinstance(value, datetime):
+            serialized[key] = value.astimezone(timezone.utc).isoformat()
+        else:
+            serialized[key] = value
+    return serialized
+
+
+def memory_content_preview(content: str, max_length: int = 220) -> str:
+    normalized = " ".join(str(content or "").split())
+    if len(normalized) <= max_length:
+        return normalized
+    return normalized[: max_length - 1].rstrip() + "…"
+
+
+def compute_memory_prominence(record: dict[str, Any]) -> float:
+    recency_frequency = compute_recency_frequency(
+        int(record.get("access_count", 0) or 0),
+        record.get("last_accessed_at"),
+    )
+    manual_boost = 1.0 if record.get("manual_pin") else 0.0
+    prominence = clamp01(
+        0.34 * manual_boost
+        + 0.24 * float(record.get("activation_score", 0.0) or 0.0)
+        + 0.18 * float(record.get("stability_score", 0.5) or 0.5)
+        + 0.14 * recency_frequency
+        + 0.10 * float(record.get("importance", 0.5) or 0.5)
+    )
+    return round(prominence, 4)
+
+
+def build_graph_node(record: dict[str, Any]) -> dict[str, Any]:
+    serialized = serialize_memory_record(record)
+    return {
+        "memory_id": serialized["id"],
+        "project": serialized.get("project"),
+        "memory_type": serialized.get("memory_type"),
+        "content_preview": memory_content_preview(str(serialized.get("content") or serialized.get("summary") or "")),
+        "tags": serialized.get("tags", []),
+        "activation_score": round(float(serialized.get("activation_score", 0.0) or 0.0), 4),
+        "stability_score": round(float(serialized.get("stability_score", 0.5) or 0.5), 4),
+        "access_count": int(serialized.get("access_count", 0) or 0),
+        "manual_pin": bool(serialized.get("manual_pin", False)),
+        "prominence": compute_memory_prominence(record),
+    }
+
+
+def canonical_memory_id_pairs(memory_ids: list[str], limit_pairs: int = 6) -> list[tuple[str, str]]:
+    unique_ids = list(dict.fromkeys(str(memory_id).strip() for memory_id in memory_ids if str(memory_id).strip()))
+    pairs: list[tuple[str, str]] = []
+    for index, left_id in enumerate(unique_ids):
+        for right_id in unique_ids[index + 1 :]:
+            pairs.append(canonical_memory_pair(left_id, right_id))
+            if len(pairs) >= limit_pairs:
+                return pairs
+    return pairs
+
+
 async def fetch_incident_relation_weights(memory_ids: list[str]) -> dict[str, float]:
     if not pg_pool or not memory_ids:
         return {}
@@ -710,6 +789,48 @@ async def fetch_incident_relation_weights(memory_ids: list[str]) -> dict[str, fl
         if target_id in weights:
             weights[target_id] = max(weights[target_id], weight)
     return weights
+
+
+async def reinforce_relation_pairs(
+    memory_ids: list[str],
+    weight_delta: float = 0.02,
+    activation_time: Optional[datetime] = None,
+) -> int:
+    if not pg_pool:
+        return 0
+    pairs = canonical_memory_id_pairs(memory_ids)
+    if not pairs:
+        return 0
+    activation_time = activation_time or now_utc()
+    source_ids = [uuid.UUID(source_id) for source_id, _ in pairs]
+    target_ids = [uuid.UUID(target_id) for _, target_id in pairs]
+    async with pg_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            WITH pairs AS (
+                SELECT *
+                FROM unnest($1::uuid[], $2::uuid[]) AS pair(source_memory_id, target_memory_id)
+            )
+            UPDATE memory_relations mr
+            SET reinforcement_count = mr.reinforcement_count + 1,
+                last_activated_at = $3::timestamptz,
+                weight = CASE
+                    WHEN mr.origin = 'manual' THEN mr.weight
+                    ELSE LEAST(1.0, mr.weight + $4)
+                END,
+                active = TRUE,
+                updated_at = $3::timestamptz
+            FROM pairs
+            WHERE mr.source_memory_id = pairs.source_memory_id
+              AND mr.target_memory_id = pairs.target_memory_id
+            RETURNING mr.id
+            """,
+            source_ids,
+            target_ids,
+            activation_time,
+            weight_delta,
+        )
+    return len(rows)
 
 
 async def upsert_memory_relation(
@@ -818,44 +939,37 @@ async def register_memory_access(results: list[dict[str, Any]]):
     if not pg_pool or not results:
         return
     current_time = now_utc()
-    top_ids = [uuid.UUID(item["id"]) for item in results[:4]]
+    unique_results = list({str(item["id"]): item for item in results}.values())
+    memory_ids = [uuid.UUID(str(item["id"])) for item in unique_results]
+    activation_scores = [float(item["hybrid_score"]) for item in unique_results]
+    stability_scores = [
+        clamp01(max(float(item["hybrid_score"]), float(item.get("stability_score", 0.5))))
+        for item in unique_results
+    ]
     async with pg_pool.acquire() as conn:
-        for item in results:
-            await conn.execute(
-                """
-                UPDATE memory_log
-                SET access_count = access_count + 1,
-                    last_accessed_at = $2,
-                    activation_score = GREATEST(COALESCE(activation_score, 0), $3),
-                    stability_score = CASE
-                        WHEN manual_pin THEN 1.0
-                        ELSE LEAST(1.0, GREATEST(COALESCE(stability_score, 0.3), $4))
-                    END
-                WHERE id = $1
-                """,
-                uuid.UUID(item["id"]),
-                current_time,
-                float(item["hybrid_score"]),
-                clamp01(max(float(item["hybrid_score"]), float(item.get("stability_score", 0.5)))),
+        await conn.execute(
+            """
+            WITH updates AS (
+                SELECT *
+                FROM unnest($1::uuid[], $2::float8[], $3::float8[]) AS item(id, activation_score, stability_score)
             )
-        if len(top_ids) >= 2:
-            await conn.execute(
-                """
-                UPDATE memory_relations
-                SET reinforcement_count = reinforcement_count + 1,
-                    last_activated_at = $2,
-                    weight = CASE
-                        WHEN origin = 'manual' THEN weight
-                        ELSE LEAST(1.0, weight + 0.02)
-                    END,
-                    active = TRUE,
-                    updated_at = $2
-                WHERE source_memory_id = ANY($1::uuid[])
-                  AND target_memory_id = ANY($1::uuid[])
-                """,
-                top_ids,
-                current_time,
-            )
+            UPDATE memory_log ml
+            SET access_count = ml.access_count + 1,
+                last_accessed_at = $4::timestamptz,
+                activation_score = GREATEST(COALESCE(ml.activation_score, 0), updates.activation_score),
+                stability_score = CASE
+                    WHEN ml.manual_pin THEN 1.0
+                    ELSE LEAST(1.0, GREATEST(COALESCE(ml.stability_score, 0.3), updates.stability_score))
+                END
+            FROM updates
+            WHERE ml.id = updates.id
+            """,
+            memory_ids,
+            activation_scores,
+            stability_scores,
+            current_time,
+        )
+    await reinforce_relation_pairs([str(item["id"]) for item in unique_results[:4]], activation_time=current_time)
 
 
 async def structured_search_memories(
@@ -1048,6 +1162,51 @@ def classify_relation_heuristic(
     return None
 
 
+async def infer_relations_from_candidates(
+    source_memory: dict[str, Any],
+    candidates: list[dict[str, Any]],
+    allowed_projects: set[str],
+    origin: str,
+    max_links: Optional[int] = None,
+) -> list[dict[str, Any]]:
+    created: list[dict[str, Any]] = []
+    normalized_tags = normalize_tags(source_memory.get("tags", []))
+    for candidate in candidates:
+        try:
+            if candidate["project"] not in allowed_projects:
+                continue
+            candidate_tags = normalize_tags(candidate.get("tags", []))
+            shared_tags = sorted(set(normalized_tags) & set(candidate_tags))
+            if candidate["semantic_score"] < 0.88 and not shared_tags:
+                continue
+            relation = classify_relation_heuristic(source_memory, candidate, candidate["semantic_score"], shared_tags)
+            if relation is None and candidate["semantic_score"] >= 0.86:
+                relation = await classify_relation_with_llm(source_memory, candidate, candidate["semantic_score"], shared_tags)
+            if relation is None:
+                continue
+            created.append(
+                await upsert_memory_relation(
+                    source_memory_id=source_memory["id"],
+                    target_memory_id=candidate["id"],
+                    relation_type=relation["relation_type"],
+                    weight=float(relation["weight"]),
+                    origin=origin,
+                    evidence={
+                        "reason": relation.get("reason", ""),
+                        "semantic_score": candidate["semantic_score"],
+                        "shared_tags": shared_tags,
+                        "source_project": source_memory.get("project"),
+                        "target_project": candidate["project"],
+                    },
+                )
+            )
+            if max_links is not None and len(created) >= max_links:
+                break
+        except Exception as exc:
+            logger.warning("No fue posible enlazar %s con %s: %s", source_memory.get("id"), candidate.get("id"), exc)
+    return created
+
+
 async def auto_link_memory(
     memory_id: str,
     content: str,
@@ -1078,39 +1237,7 @@ async def auto_link_memory(
         score_threshold=auto_link_score_threshold,
         exclude_memory_ids=[memory_id],
     )
-    created: list[dict[str, Any]] = []
-    for candidate in candidates:
-        try:
-            if candidate["project"] not in allowed_projects:
-                continue
-            candidate_tags = normalize_tags(candidate.get("tags", []))
-            shared_tags = sorted(set(normalized_tags) & set(candidate_tags))
-            if candidate["semantic_score"] < 0.88 and not shared_tags:
-                continue
-            relation = classify_relation_heuristic(source_memory, candidate, candidate["semantic_score"], shared_tags)
-            if relation is None and candidate["semantic_score"] >= 0.86:
-                relation = await classify_relation_with_llm(source_memory, candidate, candidate["semantic_score"], shared_tags)
-            if relation is None:
-                continue
-            created.append(
-                await upsert_memory_relation(
-                    source_memory_id=memory_id,
-                    target_memory_id=candidate["id"],
-                    relation_type=relation["relation_type"],
-                    weight=float(relation["weight"]),
-                    origin=origin,
-                    evidence={
-                        "reason": relation.get("reason", ""),
-                        "semantic_score": candidate["semantic_score"],
-                        "shared_tags": shared_tags,
-                        "source_project": project,
-                        "target_project": candidate["project"],
-                    },
-                )
-            )
-        except Exception as exc:
-            logger.warning("No fue posible enlazar %s con %s: %s", memory_id, candidate.get("id"), exc)
-    return created
+    return await infer_relations_from_candidates(source_memory, candidates, allowed_projects, origin)
 
 
 async def bridge_projects_internal(
@@ -1274,6 +1401,396 @@ async def list_project_bridges(project: str) -> list[dict[str, Any]]:
     return bridges
 
 
+def validate_graph_mode(mode: str) -> str:
+    normalized = str(mode or "project_hot").strip().lower()
+    if normalized not in VALID_GRAPH_MODES:
+        raise ValueError(f"invalid_graph_mode:{mode}")
+    return normalized
+
+
+async def get_memory_detail_payload(memory_id: str) -> Optional[dict[str, Any]]:
+    record = (await fetch_memory_records([memory_id])).get(memory_id)
+    if not record:
+        return None
+    serialized = serialize_memory_record(record)
+    relations = await get_relations_for_memory(memory_id)
+    return {
+        "memory": {
+            "memory_id": serialized["id"],
+            "project": serialized.get("project"),
+            "agent_id": serialized.get("agent_id"),
+            "memory_type": serialized.get("memory_type"),
+            "summary": serialized.get("summary"),
+            "content": serialized.get("content"),
+            "content_preview": memory_content_preview(str(serialized.get("content") or serialized.get("summary") or "")),
+            "importance": round(float(serialized.get("importance", 0.5) or 0.5), 4),
+            "tags": serialized.get("tags", []),
+            "access_count": int(serialized.get("access_count", 0) or 0),
+            "last_accessed_at": serialized.get("last_accessed_at"),
+            "activation_score": round(float(serialized.get("activation_score", 0.0) or 0.0), 4),
+            "stability_score": round(float(serialized.get("stability_score", 0.5) or 0.5), 4),
+            "manual_pin": bool(serialized.get("manual_pin", False)),
+            "prominence": compute_memory_prominence(record),
+        },
+        "relation_count": len(relations),
+        "relations": relations[:20],
+    }
+
+
+async def fetch_project_hot_memory_ids(
+    project: str,
+    memory_type: Optional[str] = None,
+    tags: Optional[list[str]] = None,
+    limit: int = 24,
+) -> list[str]:
+    if not pg_pool or not project:
+        return []
+    normalized_tags = normalize_tags(tags or [])
+    async with pg_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT ml.id
+            FROM memory_log ml
+            JOIN projects p ON p.id = ml.project_id
+            WHERE p.name = $1
+              AND ($2::text IS NULL OR ml.action_type = $2::text)
+              AND ($3::text[] IS NULL OR ml.tags && $3::text[])
+            ORDER BY
+                ml.manual_pin DESC,
+                ml.activation_score DESC,
+                ml.stability_score DESC,
+                ml.last_accessed_at DESC NULLS LAST,
+                ml.importance DESC,
+                ml.created_at DESC
+            LIMIT $4
+            """,
+            project,
+            memory_type,
+            normalized_tags or None,
+            limit,
+        )
+    return [str(row["id"]) for row in rows]
+
+
+def graph_relation_sort_key(row: dict[str, Any]) -> tuple[int, float, int, str]:
+    return (
+        1 if row.get("origin") == "manual" else 0,
+        float(row.get("weight") or 0.0),
+        int(row.get("reinforcement_count") or 0),
+        str(row.get("updated_at") or ""),
+    )
+
+
+async def fetch_relation_rows_touching(
+    memory_ids: list[str],
+    allowed_projects: Optional[set[str]],
+    include_inactive: bool,
+    min_weight: float,
+    limit: int,
+) -> list[dict[str, Any]]:
+    if not pg_pool or not memory_ids:
+        return []
+    async with pg_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT
+                mr.id,
+                mr.source_memory_id,
+                mr.target_memory_id,
+                mr.relation_type,
+                mr.weight,
+                mr.origin,
+                mr.evidence_json,
+                mr.reinforcement_count,
+                mr.last_activated_at,
+                mr.active,
+                mr.updated_at,
+                src_p.name AS source_project,
+                dst_p.name AS target_project
+            FROM memory_relations mr
+            JOIN memory_log src ON src.id = mr.source_memory_id
+            JOIN memory_log dst ON dst.id = mr.target_memory_id
+            LEFT JOIN projects src_p ON src_p.id = src.project_id
+            LEFT JOIN projects dst_p ON dst_p.id = dst.project_id
+            WHERE (mr.source_memory_id = ANY($1::uuid[]) OR mr.target_memory_id = ANY($1::uuid[]))
+              AND ($2::text[] IS NULL OR COALESCE(src_p.name, '') = ANY($2::text[]))
+              AND ($2::text[] IS NULL OR COALESCE(dst_p.name, '') = ANY($2::text[]))
+              AND ($3 OR mr.active = TRUE)
+              AND (mr.origin = 'manual' OR mr.weight >= $4)
+            ORDER BY
+                CASE WHEN mr.origin = 'manual' THEN 1 ELSE 0 END DESC,
+                mr.weight DESC,
+                mr.reinforcement_count DESC,
+                mr.updated_at DESC
+            LIMIT $5
+            """,
+            [uuid.UUID(memory_id) for memory_id in memory_ids],
+            sorted(allowed_projects) if allowed_projects else None,
+            include_inactive,
+            min_weight,
+            limit,
+        )
+    return [serialize_row(row) or {} for row in rows]
+
+
+async def fetch_relation_rows_between(
+    memory_ids: list[str],
+    allowed_projects: Optional[set[str]],
+    include_inactive: bool,
+    min_weight: float,
+    limit: int,
+) -> list[dict[str, Any]]:
+    if not pg_pool or not memory_ids:
+        return []
+    async with pg_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT
+                mr.id,
+                mr.source_memory_id,
+                mr.target_memory_id,
+                mr.relation_type,
+                mr.weight,
+                mr.origin,
+                mr.evidence_json,
+                mr.reinforcement_count,
+                mr.last_activated_at,
+                mr.active,
+                mr.updated_at,
+                src_p.name AS source_project,
+                dst_p.name AS target_project
+            FROM memory_relations mr
+            JOIN memory_log src ON src.id = mr.source_memory_id
+            JOIN memory_log dst ON dst.id = mr.target_memory_id
+            LEFT JOIN projects src_p ON src_p.id = src.project_id
+            LEFT JOIN projects dst_p ON dst_p.id = dst.project_id
+            WHERE mr.source_memory_id = ANY($1::uuid[])
+              AND mr.target_memory_id = ANY($1::uuid[])
+              AND ($2::text[] IS NULL OR COALESCE(src_p.name, '') = ANY($2::text[]))
+              AND ($2::text[] IS NULL OR COALESCE(dst_p.name, '') = ANY($2::text[]))
+              AND ($3 OR mr.active = TRUE)
+              AND (mr.origin = 'manual' OR mr.weight >= $4)
+            ORDER BY
+                CASE WHEN mr.origin = 'manual' THEN 1 ELSE 0 END DESC,
+                mr.weight DESC,
+                mr.reinforcement_count DESC,
+                mr.updated_at DESC
+            LIMIT $5
+            """,
+            [uuid.UUID(memory_id) for memory_id in memory_ids],
+            sorted(allowed_projects) if allowed_projects else None,
+            include_inactive,
+            min_weight,
+            limit,
+        )
+    return [serialize_row(row) or {} for row in rows]
+
+
+def build_graph_edge(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "source_memory_id": row["source_memory_id"],
+        "target_memory_id": row["target_memory_id"],
+        "relation_type": row["relation_type"],
+        "weight": round(float(row.get("weight", 0.0) or 0.0), 4),
+        "origin": row.get("origin"),
+        "active": bool(row.get("active", False)),
+        "reinforcement_count": int(row.get("reinforcement_count", 0) or 0),
+        "last_activated_at": row.get("last_activated_at"),
+    }
+
+
+async def build_graph_subgraph(payload: GraphSubgraphRequest) -> dict[str, Any]:
+    mode = validate_graph_mode(payload.mode)
+    project_name = (payload.project or "").strip() or None
+    center_memory_id = payload.center_memory_id.strip()
+
+    if mode == "memory_focus":
+        if not center_memory_id:
+            raise ValueError("center_memory_id_required")
+        center_record = (await fetch_memory_records([center_memory_id])).get(center_memory_id)
+        if not center_record:
+            raise ValueError("memory_not_found")
+        project_name = project_name or str(center_record.get("project") or "")
+
+    if mode in {"project_hot", "search"} and not project_name:
+        raise ValueError("project_required")
+    if mode == "search" and not payload.query.strip():
+        raise ValueError("query_required")
+
+    normalized_scope = validate_search_scope(payload.scope)
+    allowed_projects = set(await resolve_scope_projects(project_name, normalized_scope)) if project_name and normalized_scope != "global" else set()
+
+    if mode == "project_hot":
+        seed_limit = min(payload.node_limit, max(8, min(24, payload.node_limit // 2 or 1)))
+        seed_ids = await fetch_project_hot_memory_ids(
+            project=project_name or "",
+            memory_type=payload.memory_type,
+            tags=payload.tags,
+            limit=seed_limit,
+        )
+    elif mode == "search":
+        seed_results = await structured_search_memories(
+            query=payload.query,
+            project=project_name,
+            memory_type=payload.memory_type,
+            limit=min(payload.node_limit, 18),
+            scope=normalized_scope,
+            tags=payload.tags,
+            score_threshold=0.35,
+        )
+        seed_ids = [item["id"] for item in seed_results]
+    else:
+        seed_ids = [center_memory_id]
+
+    unique_seed_ids = list(dict.fromkeys(seed_ids))
+    if not unique_seed_ids:
+        return {
+            "nodes": [],
+            "edges": [],
+            "summary": {
+                "mode": mode,
+                "project": project_name,
+                "scope": normalized_scope,
+                "node_count": 0,
+                "edge_count": 0,
+                "seed_count": 0,
+                "requested_node_limit": payload.node_limit,
+                "requested_edge_limit": payload.edge_limit,
+                "allowed_projects": sorted(allowed_projects),
+            },
+        }
+
+    selected_ids: list[str] = unique_seed_ids[: payload.node_limit]
+    selected_set = set(selected_ids)
+    frontier = list(selected_ids)
+    for _ in range(payload.depth):
+        if not frontier or len(selected_ids) >= payload.node_limit:
+            break
+        relation_rows = await fetch_relation_rows_touching(
+            frontier,
+            allowed_projects or None,
+            payload.include_inactive,
+            payload.min_weight,
+            max(payload.edge_limit * 3, payload.node_limit * 4),
+        )
+        relation_rows.sort(key=graph_relation_sort_key, reverse=True)
+        next_frontier: list[str] = []
+        for row in relation_rows:
+            for candidate_id in (row["source_memory_id"], row["target_memory_id"]):
+                if candidate_id in selected_set:
+                    continue
+                selected_ids.append(candidate_id)
+                selected_set.add(candidate_id)
+                next_frontier.append(candidate_id)
+                if len(selected_ids) >= payload.node_limit:
+                    break
+            if len(selected_ids) >= payload.node_limit:
+                break
+        frontier = next_frontier
+
+    records = await fetch_memory_records(selected_ids)
+    ordered_nodes = [records[memory_id] for memory_id in selected_ids if memory_id in records]
+    ordered_nodes.sort(key=compute_memory_prominence, reverse=True)
+    node_ids = [node["id"] for node in ordered_nodes]
+    edge_rows = await fetch_relation_rows_between(
+        node_ids,
+        allowed_projects or None,
+        payload.include_inactive,
+        payload.min_weight,
+        payload.edge_limit,
+    )
+    edge_rows.sort(key=graph_relation_sort_key, reverse=True)
+
+    return {
+        "nodes": [build_graph_node(record) for record in ordered_nodes],
+        "edges": [build_graph_edge(row) for row in edge_rows[: payload.edge_limit]],
+        "summary": {
+            "mode": mode,
+            "project": project_name,
+            "scope": normalized_scope,
+            "query": payload.query.strip() or None,
+            "center_memory_id": center_memory_id or None,
+            "node_count": len(ordered_nodes),
+            "edge_count": min(len(edge_rows), payload.edge_limit),
+            "seed_count": len(unique_seed_ids),
+            "requested_node_limit": payload.node_limit,
+            "requested_edge_limit": payload.edge_limit,
+            "truncated_nodes": len(unique_seed_ids) > payload.node_limit or len(ordered_nodes) >= payload.node_limit,
+            "truncated_edges": len(edge_rows) > payload.edge_limit,
+            "allowed_projects": sorted(allowed_projects),
+        },
+    }
+
+
+async def get_graph_metrics(project: Optional[str] = None) -> dict[str, Any]:
+    if not pg_pool:
+        raise RuntimeError("postgres_unavailable")
+    async with pg_pool.acquire() as conn:
+        memory_row = await conn.fetchrow(
+            """
+            SELECT
+                COUNT(*)::int AS memory_count,
+                COUNT(*) FILTER (WHERE manual_pin)::int AS pinned_memory_count,
+                COUNT(*) FILTER (
+                    WHERE manual_pin
+                       OR activation_score >= 0.55
+                       OR stability_score >= 0.8
+                       OR access_count >= 3
+                )::int AS hot_memory_count,
+                AVG(activation_score) AS avg_activation_score,
+                AVG(stability_score) AS avg_stability_score
+            FROM memory_log ml
+            LEFT JOIN projects p ON p.id = ml.project_id
+            WHERE ($1::text IS NULL OR p.name = $1)
+            """,
+            project,
+        )
+        relation_row = await conn.fetchrow(
+            """
+            SELECT
+                COUNT(*)::int AS relation_count,
+                COUNT(*) FILTER (WHERE mr.active)::int AS active_relation_count
+            FROM memory_relations mr
+            JOIN memory_log src ON src.id = mr.source_memory_id
+            JOIN memory_log dst ON dst.id = mr.target_memory_id
+            LEFT JOIN projects src_p ON src_p.id = src.project_id
+            LEFT JOIN projects dst_p ON dst_p.id = dst.project_id
+            WHERE (
+                $1::text IS NULL
+                OR src_p.name = $1
+                OR dst_p.name = $1
+            )
+            """,
+            project,
+        )
+        type_rows = await conn.fetch(
+            """
+            SELECT ml.action_type AS memory_type, COUNT(*)::int AS count
+            FROM memory_log ml
+            LEFT JOIN projects p ON p.id = ml.project_id
+            WHERE ($1::text IS NULL OR p.name = $1)
+            GROUP BY ml.action_type
+            ORDER BY count DESC, ml.action_type ASC
+            LIMIT 6
+            """,
+            project,
+        )
+    bridges = await list_project_bridges(project) if project else []
+    return {
+        "project": project,
+        "memory_count": int(memory_row["memory_count"] or 0),
+        "relation_count": int(relation_row["relation_count"] or 0),
+        "active_relation_count": int(relation_row["active_relation_count"] or 0),
+        "pinned_memory_count": int(memory_row["pinned_memory_count"] or 0),
+        "hot_memory_count": int(memory_row["hot_memory_count"] or 0),
+        "avg_activation_score": round(float(memory_row["avg_activation_score"] or 0.0), 4),
+        "avg_stability_score": round(float(memory_row["avg_stability_score"] or 0.0), 4),
+        "bridge_count": len([item for item in bridges if item.get("active")]),
+        "top_memory_types": [serialize_row(row) or {} for row in type_rows],
+        "generated_at": now_iso(),
+    }
+
+
 async def apply_session_plasticity(payload: SessionSummaryRequest) -> dict[str, Any]:
     queries = [payload.summary, payload.goal, payload.outcome]
     queries.extend(payload.changes[:4])
@@ -1295,20 +1812,47 @@ async def apply_session_plasticity(payload: SessionSummaryRequest) -> dict[str, 
             if current is None or match["hybrid_score"] > current["hybrid_score"]:
                 activated[match["id"]] = match
 
-    selected = sorted(activated.values(), key=lambda item: item["hybrid_score"], reverse=True)[:3]
+    selected = sorted(activated.values(), key=lambda item: item["hybrid_score"], reverse=True)[:4]
+    reinforced_pairs = 0
+    expanded_links = 0
     if selected:
         await register_memory_access(selected)
-        for match in selected:
-            await auto_link_memory(
-                memory_id=match["id"],
-                content=match["content"],
-                project=match["project"],
-                memory_type=match["memory_type"],
-                tags=match.get("tags", []),
-                origin="reflection",
-            )
+        reinforced_pairs = await reinforce_relation_pairs([item["id"] for item in selected], weight_delta=0.015)
+
+        primary = selected[0]
+        primary_source = {
+            "id": primary["id"],
+            "project": primary["project"],
+            "memory_type": primary["memory_type"],
+            "content": primary["content"],
+            "tags": primary.get("tags", []),
+        }
+        expansion_candidates = await structured_search_memories(
+            query=primary["content"],
+            project=primary["project"],
+            memory_type=None,
+            limit=5,
+            scope="bridged",
+            tags=primary.get("tags", []),
+            score_threshold=max(0.5, AUTO_LINK_SCORE_THRESHOLD - 0.04),
+            exclude_memory_ids=[item["id"] for item in selected],
+        )
+        allowed_projects = set(await resolve_scope_projects(primary["project"], "bridged"))
+        expanded = await infer_relations_from_candidates(
+            primary_source,
+            expansion_candidates,
+            allowed_projects,
+            origin="reflection",
+            max_links=2,
+        )
+        expanded_links = len(expanded)
     decayed = await decay_project_relations(payload.project)
-    return {"activated_memories": len(selected), "decayed_relations": decayed}
+    return {
+        "activated_memories": len(selected),
+        "reinforced_pairs": reinforced_pairs,
+        "expanded_links": expanded_links,
+        "decayed_relations": decayed,
+    }
 
 async def mem0_health() -> bool:
     if not http_client or not MEM0_URL:
@@ -2362,6 +2906,18 @@ async def create_memory(payload: MemoryCreateRequest):
     return {"result": result, "memory_id": fields.get("memory_id")}
 
 
+@app.get("/api/memories/{memory_id}")
+async def api_memory_detail(memory_id: str):
+    try:
+        payload = await get_memory_detail_payload(memory_id)
+    except Exception as exc:
+        logger.exception("api_memory_detail fallo")
+        raise HTTPException(status_code=400, detail=str(exc))
+    if payload is None:
+        raise HTTPException(status_code=404, detail="memory_not_found")
+    return payload
+
+
 @app.post("/api/search")
 async def api_search_memory(payload: SearchMemoryRequest):
     result = await search_memory(**payload.model_dump())
@@ -2466,6 +3022,27 @@ async def api_list_relations(memory_id: str):
     except Exception as exc:
         logger.exception("api_list_relations fallo")
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/graph/metrics")
+async def api_graph_metrics(project: Optional[str] = None):
+    try:
+        return await get_graph_metrics(project=project)
+    except Exception as exc:
+        logger.exception("api_graph_metrics fallo")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/graph/subgraph")
+async def api_graph_subgraph(payload: GraphSubgraphRequest):
+    try:
+        return await build_graph_subgraph(payload)
+    except ValueError as exc:
+        logger.warning("api_graph_subgraph validacion fallo: %s", exc)
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.exception("api_graph_subgraph fallo")
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @app.post("/api/project-bridges")

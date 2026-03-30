@@ -17,11 +17,12 @@ from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(ROOT / ".env")
-LATENCY_ENDPOINTS = ("structured_search", "project_context", "plasticity_session")
+LATENCY_ENDPOINTS = ("structured_search", "project_context", "plasticity_session", "graph_subgraph")
 DETERMINISTIC_P95_THRESHOLDS_MS = {
     "structured_search": 250.0,
     "project_context": 2500.0,
     "plasticity_session": 1500.0,
+    "graph_subgraph": 900.0,
 }
 
 
@@ -140,6 +141,13 @@ class EvalClient:
     def apply_session_plasticity(self, payload: dict[str, Any]):
         start = time.perf_counter()
         response = self.post("/api/plasticity/session", payload)
+        latency_ms = (time.perf_counter() - start) * 1000.0
+        response["latency_ms"] = round(latency_ms, 3)
+        return response
+
+    def graph_subgraph(self, payload: dict[str, Any]):
+        start = time.perf_counter()
+        response = self.post("/api/graph/subgraph", payload)
         latency_ms = (time.perf_counter() - start) * 1000.0
         response["latency_ms"] = round(latency_ms, 3)
         return response
@@ -437,6 +445,54 @@ def evaluate_plasticity_family(
     return scenario_results, latencies, all_passed
 
 
+def evaluate_graph_family(
+    client: EvalClient, dataset: list[dict[str, Any]], run_id: str
+) -> tuple[list[dict[str, Any]], dict[str, list[float]], bool]:
+    scenario_results: list[dict[str, Any]] = []
+    latencies = empty_latency_buckets()
+    all_passed = True
+
+    for scenario in dataset:
+        project = resolve_project_name(scenario["project"], run_id)
+        alias_map, _ = seed_memories(
+            client,
+            [{**item, "project": scenario["project"]} for item in scenario["seed_memories"]],
+            run_id,
+        )
+
+        request = dict(scenario["request"])
+        request["project"] = project
+        if "center_alias" in request:
+            request["center_memory_id"] = alias_map[request.pop("center_alias")]
+        response = client.graph_subgraph(request)
+        record_latency(latencies, "graph_subgraph", response["latency_ms"])
+
+        node_ids = {item["memory_id"] for item in response["nodes"]}
+        edge_ok = all(
+            edge["source_memory_id"] in node_ids and edge["target_memory_id"] in node_ids
+            for edge in response["edges"]
+        )
+        expected_hits = {alias_map[alias] for alias in scenario.get("expected_hits", [])}
+        scenario_passed = (
+            response["summary"]["node_count"] <= int(request["node_limit"])
+            and response["summary"]["edge_count"] <= int(request["edge_limit"])
+            and expected_hits.issubset(node_ids)
+            and edge_ok
+        )
+        scenario_results.append(
+            {
+                "name": scenario["name"],
+                "passed": scenario_passed,
+                "latency_ms": response["latency_ms"],
+                "summary": response["summary"],
+                "node_ids": sorted(node_ids),
+            }
+        )
+        all_passed = all_passed and scenario_passed
+
+    return scenario_results, latencies, all_passed
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Evalua el cerebro de memoria con datasets semilla.")
     parser.add_argument("--mode", choices=["deterministic", "live"], default="deterministic")
@@ -446,6 +502,7 @@ def main() -> int:
     parser.add_argument("--structured-search-p95-threshold-ms", type=float, default=None)
     parser.add_argument("--project-context-p95-threshold-ms", type=float, default=None)
     parser.add_argument("--plasticity-session-p95-threshold-ms", type=float, default=None)
+    parser.add_argument("--graph-subgraph-p95-threshold-ms", type=float, default=None)
     args = parser.parse_args()
 
     base_url = os.getenv("AI_MEMORY_BASE_URL", "http://127.0.0.1:8050")
@@ -471,8 +528,11 @@ def main() -> int:
         plasticity_results, plasticity_latencies, plasticity_passed = evaluate_plasticity_family(
             client, dataset.get("plasticity", []), args.run_id, args.mode
         )
+        graph_results, graph_latencies, graph_passed = evaluate_graph_family(
+            client, dataset.get("graph", []), args.run_id
+        )
 
-        all_latencies = merge_latency_buckets(retrieval_latencies, bridge_latencies, plasticity_latencies)
+        all_latencies = merge_latency_buckets(retrieval_latencies, bridge_latencies, plasticity_latencies, graph_latencies)
         latency_summary = {endpoint: summarize_latency(all_latencies.get(endpoint, [])) for endpoint in LATENCY_ENDPOINTS}
         thresholds = {
             "structured_search": resolve_p95_threshold(args.mode, args.structured_search_p95_threshold_ms, "structured_search"),
@@ -480,6 +540,7 @@ def main() -> int:
             "plasticity_session": resolve_p95_threshold(
                 args.mode, args.plasticity_session_p95_threshold_ms, "plasticity_session"
             ),
+            "graph_subgraph": resolve_p95_threshold(args.mode, args.graph_subgraph_p95_threshold_ms, "graph_subgraph"),
         }
         thresholds_passed = {
             endpoint: (
@@ -496,6 +557,8 @@ def main() -> int:
             "project_context_latency_p95_ms": latency_summary["project_context"]["p95_ms"],
             "plasticity_session_latency_p50_ms": latency_summary["plasticity_session"]["p50_ms"],
             "plasticity_session_latency_p95_ms": latency_summary["plasticity_session"]["p95_ms"],
+            "graph_subgraph_latency_p50_ms": latency_summary["graph_subgraph"]["p50_ms"],
+            "graph_subgraph_latency_p95_ms": latency_summary["graph_subgraph"]["p95_ms"],
             "latency_ms": latency_summary,
             "thresholds_ms": thresholds,
             "thresholds_passed": thresholds_passed,
@@ -503,6 +566,7 @@ def main() -> int:
                 "retrieval": retrieval_passed,
                 "bridges": bridge_passed,
                 "plasticity": plasticity_passed,
+                "graph": graph_passed,
             },
         }
         result = {
@@ -514,6 +578,7 @@ def main() -> int:
             "retrieval": retrieval_results,
             "bridges": bridge_results,
             "plasticity": plasticity_results,
+            "graph": graph_results,
         }
 
         output_path = Path(args.output) if args.output else ROOT / "evals" / "results" / f"brain-eval-{args.run_id}.json"
@@ -522,7 +587,7 @@ def main() -> int:
 
         print(json.dumps({"output": str(output_path), "aggregate": aggregate}, ensure_ascii=False, indent=2))
         threshold_gate = all(thresholds_passed.values())
-        return 0 if retrieval_passed and bridge_passed and plasticity_passed and threshold_gate else 1
+        return 0 if retrieval_passed and bridge_passed and plasticity_passed and graph_passed and threshold_gate else 1
     finally:
         client.close()
 

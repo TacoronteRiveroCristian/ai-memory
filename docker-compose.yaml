@@ -208,6 +208,23 @@ services:
       retries: 5
       start_period: 30s
 
+  ui:
+    build:
+      context: ./ui
+      dockerfile: Dockerfile
+    container_name: ai-memory-ui
+    restart: unless-stopped
+    networks:
+      - frontend
+    ports:
+      - "4173:4173"
+    environment:
+      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://127.0.0.1:8050}
+      MEMORY_API_KEY: ${MEMORY_API_KEY}
+    depends_on:
+      api-server:
+        condition: service_healthy
+
 networks:
   frontend:
     driver: bridge

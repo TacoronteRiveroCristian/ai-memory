@@ -140,5 +140,44 @@
         "tags": ["tests", "plasticity"]
       }
     }
+  ],
+  "graph": [
+    {
+      "name": "event_sourcing_search_subgraph",
+      "project": "graph-main",
+      "seed_memories": [
+        {
+          "alias": "event_core",
+          "content": "Event sourcing keeps a replayable audit trail and rebuilds projections after failures.",
+          "memory_type": "architecture",
+          "tags": "concept/event-sourcing,pattern/replay,tech/postgres",
+          "importance": 0.92
+        },
+        {
+          "alias": "event_projection",
+          "content": "Replayable audit trails with event sourcing let us rebuild projections and recover state reliably.",
+          "memory_type": "architecture",
+          "tags": "concept/event-sourcing,pattern/replay,tech/postgres",
+          "importance": 0.9
+        },
+        {
+          "alias": "ui_note",
+          "content": "UI dashboard palettes are unrelated to the event sourcing model and should stay outside the focused subgraph.",
+          "memory_type": "general",
+          "tags": "concept/ui,pattern/dashboard",
+          "importance": 0.6
+        }
+      ],
+      "request": {
+        "mode": "search",
+        "query": "event sourcing replay audit trail rebuild projections",
+        "scope": "project",
+        "tags": ["concept/event-sourcing"],
+        "node_limit": 4,
+        "edge_limit": 4,
+        "include_inactive": false
+      },
+      "expected_hits": ["event_core", "event_projection"]
+    }
   ]
 }
