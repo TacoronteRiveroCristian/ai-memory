@@ -219,7 +219,7 @@ services:
     ports:
       - "4173:4173"
     environment:
-      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://127.0.0.1:8050}
+      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://api-server:8050}
       MEMORY_API_KEY: ${MEMORY_API_KEY}
     depends_on:
       api-server:
