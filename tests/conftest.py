@@ -98,6 +98,14 @@ class BrainClient:
     def set_test_clock(self, when: Optional[str]):
         return self.post("/api/test/clock", {"now": when})
 
+    def bulk_create_memories(self, memories: list[dict[str, Any]]) -> list[str]:
+        """Crea varias memorias en secuencia y devuelve la lista de memory_ids."""
+        ids: list[str] = []
+        for mem in memories:
+            result = self.create_memory(**mem)
+            ids.append(result["memory_id"])
+        return ids
+
 
 @pytest.fixture(scope="session")
 def brain_client():
