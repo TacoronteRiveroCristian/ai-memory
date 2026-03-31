@@ -1088,8 +1088,12 @@ async def decay_memory_stability(project_name: str) -> int:
             SET stability_score = GREATEST(
                 0.05,
                 ml.stability_score * exp(
-                    -EXTRACT(EPOCH FROM ($2::timestamptz - COALESCE(ml.last_accessed_at, ml.created_at))) / 86400.0
-                    / GREATEST(1.0, COALESCE(ml.stability_halflife_days, 1.0))
+                    -- Clip at -700 to prevent FLOAT8 underflow (exp(-746) is below subnormal)
+                    GREATEST(
+                        -700.0,
+                        -EXTRACT(EPOCH FROM ($2::timestamptz - COALESCE(ml.last_accessed_at, ml.created_at))) / 86400.0
+                        / GREATEST(1.0, COALESCE(ml.stability_halflife_days, 1.0))
+                    )
                 )
             )
             FROM projects p
@@ -2767,13 +2771,15 @@ async def store_memory(
                     (
                         id, project_id, agent_id, action_type, summary, details, importance, tags,
                         access_count, activation_score, stability_score, manual_pin,
-                        valence, arousal, novelty_score, review_count, stability_halflife_days
+                        valence, arousal, novelty_score, review_count, stability_halflife_days,
+                        created_at
                     )
                     VALUES (
                         $1,
                         (SELECT id FROM projects WHERE name = $2 LIMIT 1),
                         $3, $4, $5, $6::jsonb, $7, $8, 0, 0, $9, FALSE,
-                        $10, $11, $12, 0, 1.0
+                        $10, $11, $12, 0, 1.0,
+                        $13::timestamptz
                     )
                     ON CONFLICT DO NOTHING
                     """,
@@ -2789,6 +2795,7 @@ async def store_memory(
                     valence,
                     arousal,
                     novelty_score,
+                    now_utc(),  # Usar reloj del servidor (respeta test clock en modo test)
                 )
         try:
             await auto_link_memory(
