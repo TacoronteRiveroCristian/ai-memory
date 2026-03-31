@@ -66,6 +66,16 @@ CREATE TABLE IF NOT EXISTS memory_log (
     activation_score FLOAT DEFAULT 0,
     stability_score FLOAT DEFAULT 0.5,
     manual_pin BOOLEAN DEFAULT FALSE,
+    -- [1] Ebbinghaus: curva de olvido real
+    review_count INT DEFAULT 0,
+    stability_halflife_days FLOAT DEFAULT 1.0,
+    -- [2] Valencia emocional: carga afectiva de la memoria
+    valence FLOAT DEFAULT 0.0,
+    arousal FLOAT DEFAULT 0.5,
+    -- [3] Sesgo de novedad
+    novelty_score FLOAT DEFAULT 0.5,
+    -- [6] Nivel de abstracción (0=concreto, 3=esquema abstracto)
+    abstraction_level INT DEFAULT 0,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -135,6 +145,43 @@ CREATE TABLE IF NOT EXISTS project_bridges (
     CONSTRAINT project_bridges_unique UNIQUE (project_id, related_project_id)
 );
 
+-- [7] Cola de contradicciones: pares que se contradicen y necesitan resolución
+CREATE TABLE IF NOT EXISTS contradiction_queue (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    memory_a_id UUID REFERENCES memory_log(id) ON DELETE CASCADE,
+    memory_b_id UUID REFERENCES memory_log(id) ON DELETE CASCADE,
+    resolution_status VARCHAR(20) DEFAULT 'pending',
+    resolution_type VARCHAR(30),
+    resolution_memory_id UUID REFERENCES memory_log(id) ON DELETE SET NULL,
+    condition_text TEXT,
+    resolved_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    CONSTRAINT contradiction_queue_unique UNIQUE (memory_a_id, memory_b_id)
+);
+
+-- [6] Vínculos entre memorias-esquema y sus fuentes concretas
+CREATE TABLE IF NOT EXISTS schema_sources (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    schema_memory_id UUID REFERENCES memory_log(id) ON DELETE CASCADE,
+    source_memory_id UUID REFERENCES memory_log(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    CONSTRAINT schema_sources_unique UNIQUE (schema_memory_id, source_memory_id)
+);
+
+-- [8] Historial de ejecuciones de consolidación profunda (deep sleep)
+CREATE TABLE IF NOT EXISTS deep_sleep_runs (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    status VARCHAR(20) NOT NULL DEFAULT 'running',
+    memories_scanned INT DEFAULT 0,
+    schemas_created INT DEFAULT 0,
+    contradictions_resolved INT DEFAULT 0,
+    memories_pruned INT DEFAULT 0,
+    relations_reinforced INT DEFAULT 0,
+    error TEXT,
+    started_at TIMESTAMPTZ DEFAULT NOW(),
+    finished_at TIMESTAMPTZ
+);
+
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_state ON tasks(state);
 CREATE INDEX IF NOT EXISTS idx_decisions_project ON decisions(project_id);
@@ -155,6 +202,11 @@ CREATE INDEX IF NOT EXISTS idx_memory_relations_active_target ON memory_relation
 CREATE INDEX IF NOT EXISTS idx_memory_log_hotspots ON memory_log(project_id, manual_pin DESC, activation_score DESC, stability_score DESC, last_accessed_at DESC, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_project_bridges_project ON project_bridges(project_id, active);
 CREATE INDEX IF NOT EXISTS idx_project_bridges_related ON project_bridges(related_project_id, active);
+CREATE INDEX IF NOT EXISTS idx_memory_log_arousal ON memory_log(project_id, arousal DESC) WHERE arousal > 0.6;
+CREATE INDEX IF NOT EXISTS idx_memory_log_novelty ON memory_log(project_id, novelty_score DESC) WHERE novelty_score > 0.6;
+CREATE INDEX IF NOT EXISTS idx_contradiction_pending ON contradiction_queue(resolution_status) WHERE resolution_status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_schema_sources_schema ON schema_sources(schema_memory_id);
+CREATE INDEX IF NOT EXISTS idx_deep_sleep_runs_status ON deep_sleep_runs(status, started_at DESC);
 
 CREATE OR REPLACE FUNCTION update_updated_at()
 RETURNS TRIGGER AS $$
