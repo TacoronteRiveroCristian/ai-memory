@@ -1,3 +1,13 @@
+-- Ensure the application role exists regardless of POSTGRES_USER ordering.
+-- DO block is idempotent: only creates the role if it doesn't already exist.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'memoryuser') THEN
+    CREATE ROLE memoryuser WITH LOGIN SUPERUSER PASSWORD 'change-me';
+  END IF;
+END
+$$;
+
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
