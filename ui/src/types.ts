@@ -138,6 +138,40 @@ export interface GraphControlsState {
   centerMemoryId: string;
 }
 
+export interface BrainViewState {
+  dockOpen: boolean;
+  hudOpen: boolean;
+  railOpen: boolean;
+  drawerOpen: boolean;
+}
+
+export interface ProjectRegion {
+  project: string;
+  label: string;
+  hemisphere: "left" | "right" | "center";
+  x: number;
+  y: number;
+  color: string;
+  nodeCount: number;
+}
+
+export interface NodeVisualState {
+  fillColor: string;
+  borderColor: string;
+  borderWidth: number;
+  glowOpacity: number;
+  glowBlur: number;
+  opacity: number;
+  labelVisible: boolean;
+}
+
+export interface EdgeVisualState {
+  color: string;
+  width: number;
+  opacity: number;
+  lineStyle: "solid" | "dashed";
+}
+
 export interface GraphSubgraphRequestPayload {
   project: string;
   mode: GraphMode;

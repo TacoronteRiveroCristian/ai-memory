@@ -17,7 +17,7 @@ class BrainClient:
         self._client = httpx.Client(
             base_url=self.base_url,
             headers={"X-API-Key": api_key, "Content-Type": "application/json"},
-            timeout=30.0,
+            timeout=180.0,
         )
 
     def close(self):
@@ -68,6 +68,18 @@ class BrainClient:
     def list_bridges(self, project: str):
         return self.get("/api/project-bridges", params={"project": project})
 
+    def store_decision(self, **payload):
+        return self.post("/api/decisions", payload)
+
+    def store_error(self, **payload):
+        return self.post("/api/errors", payload)
+
+    def record_session(self, **payload):
+        response = self._client.post("/api/sessions", json=payload)
+        if response.status_code not in {200, 409}:
+            response.raise_for_status()
+        return response.json()
+
     def project_context(self, project_name: str, include_related: bool = True):
         return self.get(
             "/api/project-context",
@@ -76,6 +88,12 @@ class BrainClient:
 
     def apply_session_plasticity(self, **payload):
         return self.post("/api/plasticity/session", payload)
+
+    def run_reflection(self):
+        return self.post("/api/reflections/run", {})
+
+    def reflection_status(self):
+        return self.get("/api/reflections/status")
 
     def set_test_clock(self, when: Optional[str]):
         return self.post("/api/test/clock", {"now": when})

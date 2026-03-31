@@ -36,19 +36,23 @@ from qdrant_client.models import (
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("ai-memory-brain")
 
-QDRANT_HOST = os.environ["QDRANT_HOST"]
-QDRANT_PORT = int(os.environ.get("QDRANT_PORT", "6333"))
-QDRANT_API_KEY = os.environ["QDRANT_API_KEY"]
-POSTGRES_URL = os.environ["POSTGRES_URL"]
-REDIS_URL = os.environ["REDIS_URL"]
-OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
-EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "text-embedding-3-small")
-MEM0_URL = os.environ.get("MEM0_URL", "")
-API_KEY = os.environ["API_KEY"]
-DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
-DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-reasoner")
-DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
-WORKER_HEARTBEAT_KEY = os.environ.get("WORKER_HEARTBEAT_KEY", "reflection_worker:heartbeat")
+def env_text(name: str, default: str = "") -> str:
+    return os.environ.get(name, default).strip()
+
+
+QDRANT_HOST = os.environ["QDRANT_HOST"].strip()
+QDRANT_PORT = int(env_text("QDRANT_PORT", "6333"))
+QDRANT_API_KEY = os.environ["QDRANT_API_KEY"].strip()
+POSTGRES_URL = os.environ["POSTGRES_URL"].strip()
+REDIS_URL = os.environ["REDIS_URL"].strip()
+OPENAI_API_KEY = os.environ["OPENAI_API_KEY"].strip()
+EMBEDDING_MODEL = env_text("EMBEDDING_MODEL", "text-embedding-3-small")
+MEM0_URL = env_text("MEM0_URL", "")
+API_KEY = os.environ["API_KEY"].strip()
+DEEPSEEK_API_KEY = env_text("DEEPSEEK_API_KEY", "")
+DEEPSEEK_MODEL = env_text("DEEPSEEK_MODEL", "deepseek-reasoner")
+DEEPSEEK_BASE_URL = env_text("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+WORKER_HEARTBEAT_KEY = env_text("WORKER_HEARTBEAT_KEY", "reflection_worker:heartbeat")
 WORKER_HEARTBEAT_MAX_AGE = int(os.environ.get("WORKER_HEARTBEAT_MAX_AGE_SECONDS", "120"))
 MEM0_INGEST_TIMEOUT_SECONDS = float(os.environ.get("MEM0_INGEST_TIMEOUT_SECONDS", "90"))
 PROJECT_CONTEXT_WORKING_MEMORY_TIMEOUT_SECONDS = float(
@@ -70,6 +74,7 @@ AUTO_LINK_CANDIDATE_LIMIT = 6
 AUTO_LINK_SCORE_THRESHOLD = 0.78
 AI_MEMORY_TEST_MODE = os.environ.get("AI_MEMORY_TEST_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
 AI_MEMORY_TEST_NOW = os.environ.get("AI_MEMORY_TEST_NOW", "").strip()
+SESSION_MEM0_TIMEOUT_SECONDS = min(MEM0_INGEST_TIMEOUT_SECONDS, 5.0) if AI_MEMORY_TEST_MODE else MEM0_INGEST_TIMEOUT_SECONDS
 EMBEDDING_CACHE_NAMESPACE = "embed:test:v2" if AI_MEMORY_TEST_MODE else f"embed:live:{EMBEDDING_MODEL}"
 
 qdrant: Optional[AsyncQdrantClient] = None
@@ -2071,12 +2076,12 @@ async def ingest_session_into_mem0(payload: SessionSummaryRequest) -> tuple[bool
             "agent_id": payload.agent_id,
             "run_id": payload.session_id,
             "metadata": metadata,
-            "enable_graph": True,
+            "enable_graph": not AI_MEMORY_TEST_MODE,
         }
         response = await http_client.post(
             f"{MEM0_URL}/memories",
             json=body,
-            timeout=MEM0_INGEST_TIMEOUT_SECONDS,
+            timeout=SESSION_MEM0_TIMEOUT_SECONDS,
         )
         response.raise_for_status()
         data = response.json()
@@ -2091,6 +2096,10 @@ async def ingest_session_into_mem0(payload: SessionSummaryRequest) -> tuple[bool
         summary_added = result_count(summary_result)
         if summary_added > 0:
             return True, None
+
+        if AI_MEMORY_TEST_MODE:
+            logger.warning("Mem0 devolvio results vacio para session summary %s en test_mode", payload.session_id)
+            return False, "mem0_empty_results"
 
         fallback_added = 0
         for fact in build_session_summary_facts(payload):

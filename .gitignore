@@ -17,3 +17,6 @@ htmlcov/
 /ui/*.tsbuildinfo
 /ui/vite.config.js
 /ui/vite.config.d.ts
+/ui/playwright-report/
+/ui/test-results/
+/.tmp/

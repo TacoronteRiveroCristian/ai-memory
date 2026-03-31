@@ -11,7 +11,7 @@ services:
       - "127.0.0.1:6333:6333"
       - "127.0.0.1:6334:6334"
     volumes:
-      - ./volumes/qdrant:/qdrant/storage
+      - ${AI_MEMORY_QDRANT_VOLUME:-./volumes/qdrant}:/qdrant/storage
     environment:
       QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY}
       QDRANT__TELEMETRY_DISABLED: "true"
@@ -28,7 +28,7 @@ services:
     ports:
       - "127.0.0.1:5434:5432"
     volumes:
-      - ./volumes/postgres:/var/lib/postgresql/data
+      - ${AI_MEMORY_POSTGRES_VOLUME:-./volumes/postgres}:/var/lib/postgresql/data
       - ./config/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
@@ -62,7 +62,7 @@ services:
     ports:
       - "127.0.0.1:6379:6379"
     volumes:
-      - ./volumes/redis:/data
+      - ${AI_MEMORY_REDIS_VOLUME:-./volumes/redis}:/data
     command: >
       redis-server
         --save 300 1
@@ -89,7 +89,7 @@ services:
     ports:
       - "127.0.0.1:8000:8000"
     volumes:
-      - ./volumes/mem0:/app/history
+      - ${AI_MEMORY_MEM0_VOLUME:-./volumes/mem0}:/app/history
     environment:
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}

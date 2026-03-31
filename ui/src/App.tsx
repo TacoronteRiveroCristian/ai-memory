@@ -1,9 +1,11 @@
 import cytoscape, { type Core } from "cytoscape";
 import fcose from "cytoscape-fcose";
+import { AnimatePresence, motion } from "framer-motion";
 import {
   startTransition,
   useDeferredValue,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type ChangeEvent,
@@ -17,10 +19,12 @@ import {
 } from "./api";
 import {
   buildCytoscapeElements,
+  buildProjectRegions,
   buildSubgraphRequest,
   shouldPauseAutoRefresh,
 } from "./graph";
 import type {
+  BrainViewState,
   GraphControlsState,
   GraphFacets,
   GraphMetrics,
@@ -43,7 +47,23 @@ const DEFAULT_CONTROLS: GraphControlsState = {
   centerMemoryId: "",
 };
 
+const DEFAULT_VIEW_STATE: BrainViewState = {
+  dockOpen: true,
+  hudOpen: true,
+  railOpen: true,
+  drawerOpen: false,
+};
+
 const INTERACTION_COOLDOWN_MS = 8000;
+
+type HoveredNodeState = {
+  memoryId: string;
+  label: string;
+  project: string;
+  memoryType: string;
+  x: number;
+  y: number;
+};
 
 function formatTimestamp(value: string | null | undefined): string {
   if (!value) {
@@ -56,22 +76,29 @@ function formatTimestamp(value: string | null | undefined): string {
   return parsed.toLocaleString();
 }
 
-function MetricCard(props: {
+function formatRatio(value: number | null | undefined): string {
+  if (typeof value !== "number" || Number.isNaN(value)) {
+    return "—";
+  }
+  return value.toFixed(2);
+}
+
+function MetricBadge(props: {
   label: string;
   value: string | number;
-  helper: string;
+  accent?: "teal" | "gold" | "blue" | "rose";
 }) {
   return (
-    <article className="metric-card">
-      <span className="metric-card__label">{props.label}</span>
-      <strong className="metric-card__value">{props.value}</strong>
-      <span className="metric-card__helper">{props.helper}</span>
-    </article>
+    <div className={`metric-badge metric-badge--${props.accent ?? "teal"}`}>
+      <span>{props.label}</span>
+      <strong>{props.value}</strong>
+    </div>
   );
 }
 
 function App() {
   const [controls, setControls] = useState<GraphControlsState>(DEFAULT_CONTROLS);
+  const [viewState, setViewState] = useState<BrainViewState>(DEFAULT_VIEW_STATE);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [reloadToken, setReloadToken] = useState(0);
 
@@ -89,12 +116,16 @@ function App() {
   const [detail, setDetail] = useState<MemoryDetailResponse | null>(null);
   const [detailError, setDetailError] = useState("");
 
+  const [hoveredMemoryId, setHoveredMemoryId] = useState("");
+  const [hoveredNode, setHoveredNode] = useState<HoveredNodeState | null>(null);
+
   const [isInteracting, setIsInteracting] = useState(false);
   const [lastInteractionAt, setLastInteractionAt] = useState<number | null>(null);
 
   const graphRef = useRef<HTMLDivElement | null>(null);
   const cyRef = useRef<Core | null>(null);
   const interactionTimeoutRef = useRef<number | null>(null);
+  const lastNodeTapRef = useRef<{ memoryId: string; at: number } | null>(null);
 
   const activeProject = controls.project.trim();
   const deferredQuery = useDeferredValue(controls.query);
@@ -105,12 +136,20 @@ function App() {
     Date.now(),
     INTERACTION_COOLDOWN_MS,
   );
+  const projectRegions = useMemo(
+    () => buildProjectRegions(graphData, activeProject),
+    [graphData, activeProject],
+  );
 
   function patchControls<K extends keyof GraphControlsState>(
     key: K,
     value: GraphControlsState[K],
   ) {
     setControls((current) => ({ ...current, [key]: value }));
+  }
+
+  function patchViewState<K extends keyof BrainViewState>(key: K, value: BrainViewState[K]) {
+    setViewState((current) => ({ ...current, [key]: value }));
   }
 
   function refreshNow() {
@@ -129,16 +168,47 @@ function App() {
     }, INTERACTION_COOLDOWN_MS);
   }
 
-  function focusMemory(memoryId: string) {
+  function closeDrawer() {
+    patchViewState("drawerOpen", false);
+  }
+
+  function selectMemory(memoryId: string, openDrawer = true) {
     if (!memoryId) {
       return;
     }
     markInteraction();
+    startTransition(() => {
+      setSelectedMemoryId(memoryId);
+    });
+    if (openDrawer) {
+      patchViewState("drawerOpen", true);
+    }
+  }
+
+  function focusMemory(memoryId: string, project = "") {
+    if (!memoryId) {
+      return;
+    }
+    markInteraction();
+    if (project) {
+      patchControls("project", project);
+    }
     patchControls("mode", "memory_focus");
     patchControls("centerMemoryId", memoryId);
     startTransition(() => {
       setSelectedMemoryId(memoryId);
     });
+    patchViewState("drawerOpen", true);
+    refreshNow();
+  }
+
+  function applyProjectFilter(project: string) {
+    setControls((current) => ({
+      ...current,
+      project,
+      mode: current.mode === "memory_focus" ? "project_hot" : current.mode,
+      centerMemoryId: "",
+    }));
     refreshNow();
   }
 
@@ -153,6 +223,9 @@ function App() {
       query: "",
     }));
     setSelectedMemoryId("");
+    setHoveredMemoryId("");
+    setHoveredNode(null);
+    patchViewState("drawerOpen", false);
     refreshNow();
   }
 
@@ -162,6 +235,16 @@ function App() {
         window.clearTimeout(interactionTimeoutRef.current);
       }
     };
+  }, []);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        patchViewState("drawerOpen", false);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
   useEffect(() => {
@@ -177,96 +260,138 @@ function App() {
           selector: "node",
           style: {
             label: "data(label)",
+            "text-opacity": "data(labelOpacity)",
             "font-size": 11,
             "font-family": "Space Grotesk, Segoe UI, sans-serif",
-            color: "#1b2925",
+            color: "#f4f7ff",
             "text-wrap": "wrap",
-            "text-max-width": 130,
+            "text-max-width": 150,
             "text-valign": "center",
             "text-halign": "center",
-            width: "mapData(size, 0.05, 1, 36, 82)",
-            height: "mapData(size, 0.05, 1, 36, 82)",
-            "border-width": 1.6,
-            "border-color": "#b7cbc7",
-            "background-color": "#edf4f2",
+            width: "mapData(size, 0.08, 1, 18, 76)",
+            height: "mapData(size, 0.08, 1, 18, 76)",
+            "border-width": "data(borderWidth)",
+            "border-color": "data(borderColor)",
+            "background-color": "data(fillColor)",
+            "background-opacity": "data(nodeOpacity)",
             "overlay-opacity": 0,
+            "shadow-color": "data(projectColor)",
+            "shadow-opacity": "data(glowOpacity)",
+            "shadow-blur": "data(glowBlur)",
           },
         },
         {
-          selector: "node.manual-pin",
+          selector: "node.hovered-node",
           style: {
-            shape: "round-rectangle",
-            "border-color": "#c59d64",
-            "border-width": 2.6,
-            "background-color": "#f5ede2",
+            "text-opacity": 1,
+            "border-width": 3.6,
+            "shadow-opacity": 0.9,
+            "shadow-blur": 42,
           },
         },
         {
           selector: "node.selected-node",
           style: {
-            "border-color": "#2f7d76",
-            "border-width": "3.4",
-            "shadow-color": "#7db8b1",
-            "shadow-opacity": "0.25",
-            "shadow-blur": "24",
+            "text-opacity": 1,
+            "border-width": 4.4,
+            "shadow-opacity": 0.95,
+            "shadow-blur": 52,
           },
         },
         {
-          selector: "node.type-decision",
-          style: { "background-color": "#e9f1f9" },
-        },
-        {
-          selector: "node.type-error",
-          style: { "background-color": "#f9ece8" },
-        },
-        {
-          selector: "node.type-architecture",
-          style: { "background-color": "#e7f3ef" },
+          selector: "node.manual-pin",
+          style: {
+            "border-color": "#ffd38b",
+          },
         },
         {
           selector: "edge",
           style: {
-            width: "mapData(weight, 0, 1, 1, 4.8)",
-            "line-color": "#c8d4d1",
-            "target-arrow-color": "#c8d4d1",
+            width: "data(edgeWidth)",
+            "line-color": "data(edgeColor)",
+            "target-arrow-color": "data(edgeColor)",
             "curve-style": "bezier",
-            opacity: "mapData(weight, 0, 1, 0.12, 0.9)",
+            opacity: "data(edgeOpacity)",
           },
         },
         {
           selector: "edge.manual-edge",
           style: {
-            "line-color": "#c59d64",
-            "target-arrow-color": "#c59d64",
+            width: "data(edgeWidth)",
+          },
+        },
+        {
+          selector: "edge.dashed-edge",
+          style: {
+            "line-style": "dashed",
           },
         },
         {
           selector: "edge.inactive-edge",
           style: {
-            "line-style": "dashed",
-            opacity: "0.18",
+            opacity: "data(edgeOpacity)",
           },
         },
-      ] as any,
+      ] as never,
     });
 
     const onNodeTap = (event: cytoscape.EventObject) => {
       const memoryId = String(event.target.data("memoryId") ?? "");
+      const project = String(event.target.data("project") ?? "");
       if (!memoryId) {
         return;
       }
-      markInteraction();
-      startTransition(() => {
-        setSelectedMemoryId(memoryId);
+      const now = Date.now();
+      const isDoubleTap =
+        lastNodeTapRef.current?.memoryId === memoryId &&
+        now - lastNodeTapRef.current.at < 300;
+      lastNodeTapRef.current = { memoryId, at: now };
+
+      if (isDoubleTap) {
+        focusMemory(memoryId, project);
+        return;
+      }
+      selectMemory(memoryId, true);
+    };
+
+    const onNodeOver = (event: cytoscape.EventObject) => {
+      const memoryId = String(event.target.data("memoryId") ?? "");
+      if (!memoryId) {
+        return;
+      }
+      const renderedPosition =
+        "renderedPosition" in event && event.renderedPosition
+          ? event.renderedPosition
+          : { x: 0, y: 0 };
+      setHoveredMemoryId(memoryId);
+      setHoveredNode({
+        memoryId,
+        label: String(event.target.data("label") ?? ""),
+        project: String(event.target.data("project") ?? ""),
+        memoryType: String(event.target.data("memoryType") ?? "general"),
+        x: renderedPosition.x,
+        y: renderedPosition.y,
       });
     };
 
+    const onNodeOut = () => {
+      setHoveredMemoryId("");
+      setHoveredNode(null);
+    };
+
+    const onCanvasInteraction = () => {
+      markInteraction();
+      setHoveredNode(null);
+    };
+
     cy.on("tap", "node", onNodeTap);
-    cy.on("dragfree", markInteraction);
-    cy.on("grab", markInteraction);
-    cy.on("pan", markInteraction);
-    cy.on("zoom", markInteraction);
-    cy.on("layoutstart", markInteraction);
+    cy.on("mouseover", "node", onNodeOver);
+    cy.on("mouseout", "node", onNodeOut);
+    cy.on("dragfree", onCanvasInteraction);
+    cy.on("grab", onCanvasInteraction);
+    cy.on("pan", onCanvasInteraction);
+    cy.on("zoom", onCanvasInteraction);
+    cy.on("layoutstart", onCanvasInteraction);
 
     const currentContainer = graphRef.current;
     const onPointerDown = () => markInteraction();
@@ -289,23 +414,69 @@ function App() {
       return;
     }
     const cy = cyRef.current;
-    const elements = buildCytoscapeElements(graphData, selectedMemoryId);
-    cy.elements().remove();
+    const elements = buildCytoscapeElements(graphData, { projectRegions });
+    cy.batch(() => {
+      cy.elements().remove();
+      if (elements.length) {
+        cy.add(elements);
+      }
+    });
+
     if (!elements.length) {
       return;
     }
-    cy.add(elements);
+
+    cy.layout({
+      name: "preset",
+      fit: false,
+    } as never).run();
+
     cy.layout({
       name: "fcose",
       animate: true,
-      animationDuration: 320,
+      animationDuration: 420,
       fit: true,
-      padding: 40,
+      randomize: false,
+      padding: 70,
       idealEdgeLength: 136,
-      nodeRepulsion: 3900,
-      gravity: 0.16,
-    } as any).run();
-  }, [graphData, selectedMemoryId]);
+      nodeRepulsion: 9800,
+      gravity: 0.08,
+      quality: "default",
+    } as never).run();
+  }, [graphData, projectRegions]);
+
+  useEffect(() => {
+    if (!cyRef.current) {
+      return;
+    }
+    const cy = cyRef.current;
+    cy.nodes().removeClass("selected-node");
+    if (!selectedMemoryId) {
+      return;
+    }
+    const node = cy.$id(selectedMemoryId);
+    if (typeof node.addClass === "function") {
+      node.addClass("selected-node");
+      if (typeof cy.animate === "function") {
+        cy.animate({ center: { eles: node }, duration: 260 });
+      }
+    }
+  }, [selectedMemoryId]);
+
+  useEffect(() => {
+    if (!cyRef.current) {
+      return;
+    }
+    const cy = cyRef.current;
+    cy.nodes().removeClass("hovered-node");
+    if (!hoveredMemoryId) {
+      return;
+    }
+    const node = cy.$id(hoveredMemoryId);
+    if (typeof node.addClass === "function") {
+      node.addClass("hovered-node");
+    }
+  }, [hoveredMemoryId]);
 
   useEffect(() => {
     let active = true;
@@ -321,7 +492,9 @@ function App() {
         if (!active) {
           return;
         }
-        setFacetsError(error instanceof Error ? error.message : "No pude leer las claves del cerebro");
+        setFacetsError(
+          error instanceof Error ? error.message : "No pude leer las claves del cerebro",
+        );
       }
     };
 
@@ -419,6 +592,9 @@ function App() {
             return response.nodes[0]?.memory_id ?? "";
           });
         });
+        if (!response.nodes.length) {
+          patchViewState("drawerOpen", false);
+        }
         setGraphError("");
       } catch (error) {
         if (!active) {
@@ -439,7 +615,14 @@ function App() {
       };
     }
     const intervalId = window.setInterval(() => {
-      if (!shouldPauseAutoRefresh(isInteracting, lastInteractionAt, Date.now(), INTERACTION_COOLDOWN_MS)) {
+      if (
+        !shouldPauseAutoRefresh(
+          isInteracting,
+          lastInteractionAt,
+          Date.now(),
+          INTERACTION_COOLDOWN_MS,
+        )
+      ) {
         void loadGraph();
       }
     }, 10000);
@@ -495,545 +678,649 @@ function App() {
   const topTags = facets?.top_tags ?? [];
   const hotMemories = facets?.hot_memories ?? [];
   const graphHasNodes = Boolean(graphData?.nodes.length);
-  const graphTitle =
-    controls.mode === "memory_focus"
-      ? "Memoria en foco"
-      : activeProject || "Exploración del cerebro";
+  const compactRegionLabels = projectRegions.length > 7;
 
   return (
-    <div className="app-shell">
-      <header className="topbar">
-        <div>
-          <p className="kicker">AI MEMORY BRAIN</p>
-          <h1>Mapa limpio del cerebro</h1>
-          <p className="lede">
-            Explora tus memorias con una vista clara, filtros guiados y claves reales sacadas del
-            propio cerebro: proyectos, tipos, etiquetas y memorias calientes.
-          </p>
-        </div>
-        <div className="topbar__meta">
-          <span className="soft-pill">
-            {graphRefreshPaused ? "Auto-refresh en pausa" : autoRefresh ? "Auto-refresh activo" : "Refresco manual"}
-          </span>
-          <span className="soft-pill soft-pill--muted">
-            {graphLoading ? "cargando mapa" : "mapa listo"}
-          </span>
-          <button className="primary-button" onClick={refreshNow} type="button">
-            Actualizar ahora
-          </button>
-        </div>
-      </header>
-
-      <section className="toolbar-card">
-        <div className="section-heading">
-          <div>
-            <p className="section-kicker">Explorar</p>
-            <h2>Controles principales</h2>
-          </div>
-          <button className="ghost-button" onClick={clearFilters} type="button">
-            Limpiar filtros
-          </button>
-        </div>
-
-        <div className="toolbar-grid">
-          <label className="field">
-            <span>Proyecto</span>
-            <select
-              value={controls.project}
-              onChange={(event) => patchControls("project", event.target.value)}
-            >
-              <option value="">Selecciona un proyecto</option>
-              {projects.map((item) => (
-                <option key={item.project} value={item.project}>
-                  {item.project} · {item.memory_count}
-                </option>
-              ))}
-            </select>
-          </label>
-
-          <label className="field">
-            <span>Vista</span>
-            <select
-              value={controls.mode}
-              onChange={(event) => patchControls("mode", event.target.value as GraphControlsState["mode"])}
-            >
-              <option value="project_hot">Proyecto activo</option>
-              <option value="search">Buscar ideas</option>
-              <option value="memory_focus">Memoria en foco</option>
-            </select>
-          </label>
-
-          <label className="field">
-            <span>Alcance</span>
-            <select
-              value={controls.scope}
-              onChange={(event) => patchControls("scope", event.target.value as GraphControlsState["scope"])}
-            >
-              <option value="project">Solo proyecto</option>
-              <option value="bridged">Proyectos conectados</option>
-              <option value="global">Global</option>
-            </select>
-          </label>
-
-          <label className="field">
-            <span>Tipo de memoria</span>
-            <select
-              value={controls.memoryType}
-              onChange={(event) => patchControls("memoryType", event.target.value)}
-            >
-              <option value="">Todos</option>
-              {memoryTypes.map((item) => (
-                <option key={item.memory_type} value={item.memory_type}>
-                  {item.memory_type} · {item.count}
-                </option>
-              ))}
-            </select>
-          </label>
-
-          <label className="field">
-            <span>Etiqueta clave</span>
-            <select
-              value={selectedTag}
-              onChange={(event) => patchControls("tagsInput", event.target.value)}
-            >
-              <option value="">Sin etiqueta</option>
-              {topTags.map((item) => (
-                <option key={item.tag} value={item.tag}>
-                  {item.tag} · {item.count}
-                </option>
-              ))}
-            </select>
-          </label>
-
-          <label className="field field--wide">
-            <span>Memoria focal</span>
-            <select
-              value={controls.centerMemoryId}
-              onChange={(event) => patchControls("centerMemoryId", event.target.value)}
-            >
-              <option value="">Elegir memoria caliente</option>
-              {hotMemories.map((item) => (
-                <option key={item.memory_id} value={item.memory_id}>
-                  {item.content_preview}
-                </option>
-              ))}
-            </select>
-          </label>
-
-          <label className="field field--wide">
-            <span>Búsqueda</span>
-            <input
-              value={controls.query}
-              onChange={(event) => patchControls("query", event.target.value)}
-              placeholder={
-                controls.mode === "search"
-                  ? "Describe lo que quieres recuperar"
-                  : "Solo se usa en la vista Buscar ideas"
-              }
-            />
-          </label>
-
-          <label className="field">
-            <span>Nodos</span>
-            <input
-              type="number"
-              min={1}
-              max={80}
-              value={controls.nodeLimit}
-              onChange={(event) => onNumberInput("nodeLimit", event)}
-            />
-          </label>
-
-          <label className="field">
-            <span>Aristas</span>
-            <input
-              type="number"
-              min={1}
-              max={200}
-              value={controls.edgeLimit}
-              onChange={(event) => onNumberInput("edgeLimit", event)}
-            />
-          </label>
-        </div>
-
-        <div className="toolbar-actions">
-          <label className="toggle">
-            <input
-              checked={controls.includeInactive}
-              onChange={(event) => patchControls("includeInactive", event.target.checked)}
-              type="checkbox"
-            />
-            <span>Incluir enlaces inactivos</span>
-          </label>
-          <label className="toggle">
-            <input
-              checked={autoRefresh}
-              onChange={(event) => setAutoRefresh(event.target.checked)}
-              type="checkbox"
-            />
-            <span>Auto-refresh</span>
-          </label>
+    <div className="brain-app">
+      <div className="brain-shell">
+        <div className="brain-panel-switches">
           <button
-            className="ghost-button"
-            onClick={() => focusMemory(controls.centerMemoryId || selectedMemoryId)}
+            className="panel-toggle"
+            onClick={() => patchViewState("dockOpen", !viewState.dockOpen)}
             type="button"
           >
-            Enfocar memoria elegida
+            Filtros
+          </button>
+          <button
+            className="panel-toggle"
+            onClick={() => patchViewState("hudOpen", !viewState.hudOpen)}
+            type="button"
+          >
+            HUD
+          </button>
+          <button
+            className="panel-toggle"
+            onClick={() => patchViewState("railOpen", !viewState.railOpen)}
+            type="button"
+          >
+            Rail
           </button>
         </div>
-      </section>
 
-      <section className="brain-keys-card">
-        <div className="section-heading">
-          <div>
-            <p className="section-kicker">Claves del cerebro</p>
-            <h2>Atajos y sugerencias reales</h2>
-          </div>
-          <span className="section-meta">
-            {facets?.generated_at ? `actualizado ${formatTimestamp(facets.generated_at)}` : "leyendo cerebro…"}
-          </span>
-        </div>
+        <motion.section
+          animate={{ opacity: 1, y: 0 }}
+          className="brain-stage"
+          initial={{ opacity: 0, y: 20 }}
+          transition={{ duration: 0.55, ease: [0.22, 1, 0.36, 1] }}
+        >
+          <div className="brain-stage__glow brain-stage__glow--left" />
+          <div className="brain-stage__glow brain-stage__glow--right" />
+          <div className="brain-silhouette" />
 
-        <div className="brain-keys-grid">
-          <details className="brain-key" open>
-            <summary>
-              <span>Proyectos</span>
-              <strong>{projects.length}</strong>
-            </summary>
-            <div className="brain-key__content">
-              {projects.map((item) => (
-                <button
-                  className="chip-button"
-                  key={item.project}
-                  onClick={() => patchControls("project", item.project)}
-                  type="button"
+          <div className="brain-regions">
+            {projectRegions.map((region, index) => {
+              const shouldShowLabel =
+                !compactRegionLabels || region.project === activeProject || index < 6;
+              const diameter = Math.min(220, 120 + region.nodeCount * 14);
+              return (
+                <div
+                  className={`brain-region ${region.project === activeProject ? "brain-region--active" : ""}`}
+                  key={region.project}
+                  style={{
+                    left: `${region.x * 100}%`,
+                    top: `${region.y * 100}%`,
+                    width: `${diameter}px`,
+                    height: `${diameter}px`,
+                    background: `radial-gradient(circle, ${region.color}22 0%, ${region.color}0f 44%, transparent 74%)`,
+                    boxShadow: `0 0 56px ${region.color}22`,
+                  }}
                 >
-                  {item.project}
-                  <small>{item.memory_count}</small>
-                </button>
-              ))}
-            </div>
-          </details>
-
-          <details className="brain-key" open>
-            <summary>
-              <span>Tipos</span>
-              <strong>{memoryTypes.length}</strong>
-            </summary>
-            <div className="brain-key__content">
-              {memoryTypes.map((item) => (
-                <button
-                  className="chip-button"
-                  key={item.memory_type}
-                  onClick={() => patchControls("memoryType", item.memory_type)}
-                  type="button"
-                >
-                  {item.memory_type}
-                  <small>{item.count}</small>
-                </button>
-              ))}
-            </div>
-          </details>
-
-          <details className="brain-key" open>
-            <summary>
-              <span>Etiquetas</span>
-              <strong>{topTags.length}</strong>
-            </summary>
-            <div className="brain-key__content">
-              {topTags.map((item) => (
-                <button
-                  className="chip-button"
-                  key={item.tag}
-                  onClick={() => patchControls("tagsInput", item.tag)}
-                  type="button"
-                >
-                  {item.tag}
-                  <small>{item.count}</small>
-                </button>
-              ))}
-            </div>
-          </details>
-
-          <details className="brain-key" open>
-            <summary>
-              <span>Memorias calientes</span>
-              <strong>{hotMemories.length}</strong>
-            </summary>
-            <div className="memory-picks">
-              {hotMemories.map((item) => (
-                <button
-                  className="memory-pick"
-                  key={item.memory_id}
-                  onClick={() => focusMemory(item.memory_id)}
-                  type="button"
-                >
-                  <span className="memory-pick__title">{item.content_preview}</span>
-                  <span className="memory-pick__meta">
-                    {(item.memory_type || "general").replace(/_/g, " ")} · {item.prominence.toFixed(2)}
-                  </span>
-                </button>
-              ))}
-            </div>
-          </details>
-        </div>
-
-        {facetsError ? <p className="notice notice--warning">{facetsError}</p> : null}
-      </section>
-
-      <section className="metrics-strip">
-        <MetricCard
-          label="Memorias"
-          value={metrics?.memory_count ?? "—"}
-          helper="volumen visible del cerebro"
-        />
-        <MetricCard
-          label="Relaciones activas"
-          value={metrics?.active_relation_count ?? "—"}
-          helper="enlaces actualmente vivos"
-        />
-        <MetricCard
-          label="Fijadas"
-          value={metrics?.pinned_memory_count ?? "—"}
-          helper="anclas manuales estables"
-        />
-        <MetricCard
-          label="Cluster caliente"
-          value={metrics?.hot_memory_count ?? "—"}
-          helper="memorias más presentes"
-        />
-      </section>
-
-      <section className="workspace">
-        <article className="graph-panel">
-          <div className="section-heading">
-            <div>
-              <p className="section-kicker">Subgrafo</p>
-              <h2>{graphTitle}</h2>
-            </div>
-            <div className="panel-badges">
-              <span className="soft-pill">{graphData?.summary.node_count ?? 0} nodos</span>
-              <span className="soft-pill">{graphData?.summary.edge_count ?? 0} enlaces</span>
-              <span className="soft-pill soft-pill--muted">
-                {controls.mode === "project_hot"
-                  ? "proyecto activo"
-                  : controls.mode === "search"
-                    ? "búsqueda"
-                    : "foco"}
-              </span>
-            </div>
-          </div>
-
-          <div className="subtle-row">
-            <span>
-              {controls.scope === "global"
-                ? "alcance global"
-                : controls.scope === "bridged"
-                  ? "incluye proyectos conectados"
-                  : "solo este proyecto"}
-            </span>
-            <span>
-              {graphRefreshPaused
-                ? "pauso el refresco mientras mueves el mapa"
-                : autoRefresh
-                  ? "refresco automático cada 10s"
-                  : "refresco manual"}
-            </span>
-          </div>
-
-          {graphLoading ? <div className="loading-line" /> : null}
-          {graphError ? <p className="notice notice--danger">{graphError}</p> : null}
-          {metricsError ? <p className="notice notice--warning">{metricsError}</p> : null}
-
-          {graphHasNodes ? (
-            <div className="graph-surface">
-              <div className="graph-canvas" ref={graphRef} />
-            </div>
-          ) : (
-            <div className="empty-state">
-              <strong>No hay nodos para esta vista todavía.</strong>
-              <p>
-                Prueba con otro proyecto, quita filtros o usa una de las claves del cerebro para
-                arrancar desde una memoria caliente.
-              </p>
-              <div className="empty-state__actions">
-                {projects.slice(0, 3).map((item) => (
-                  <button
-                    className="ghost-button"
-                    key={item.project}
-                    onClick={() => patchControls("project", item.project)}
-                    type="button"
-                  >
-                    Abrir {item.project}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-
-          <div className="legend-row">
-            <span><i className="legend-dot legend-dot--architecture" /> arquitectura</span>
-            <span><i className="legend-dot legend-dot--decision" /> decisión</span>
-            <span><i className="legend-dot legend-dot--error" /> error</span>
-            <span><i className="legend-dot legend-dot--pin" /> fijada</span>
-          </div>
-        </article>
-
-        <aside className="inspector">
-          <section className="info-card">
-            <div className="section-heading">
-              <div>
-                <p className="section-kicker">Detalle</p>
-                <h2>{detail?.memory.memory_type ? detail.memory.memory_type.replace(/_/g, " ") : "Sin selección"}</h2>
-              </div>
-              <span className="soft-pill">
-                {detail ? `${detail.memory.prominence.toFixed(2)} prominencia` : "elige un nodo"}
-              </span>
-            </div>
-
-            {detail ? (
-              <>
-                <p className="lead-copy">{detail.memory.content_preview}</p>
-                <details className="fold-card" open>
-                  <summary>Contenido completo</summary>
-                  <p>{detail.memory.content || detail.memory.summary}</p>
-                </details>
-                <details className="fold-card" open>
-                  <summary>Etiquetas y señales</summary>
-                  <div className="tag-cloud">
-                    {detail.memory.tags.map((tag) => (
-                      <button
-                        className="tag-pill"
-                        key={tag}
-                        onClick={() => patchControls("tagsInput", tag)}
-                        type="button"
-                      >
-                        {tag}
-                      </button>
-                    ))}
-                  </div>
-                  <dl className="detail-list">
-                    <div>
-                      <dt>Proyecto</dt>
-                      <dd>{detail.memory.project || "sin proyecto"}</dd>
-                    </div>
-                    <div>
-                      <dt>Accesos</dt>
-                      <dd>{detail.memory.access_count}</dd>
-                    </div>
-                    <div>
-                      <dt>Activación</dt>
-                      <dd>{detail.memory.activation_score.toFixed(3)}</dd>
-                    </div>
-                    <div>
-                      <dt>Estabilidad</dt>
-                      <dd>{detail.memory.stability_score.toFixed(3)}</dd>
-                    </div>
-                    <div>
-                      <dt>Fijada</dt>
-                      <dd>{detail.memory.manual_pin ? "sí" : "no"}</dd>
-                    </div>
-                    <div>
-                      <dt>Último acceso</dt>
-                      <dd>{formatTimestamp(detail.memory.last_accessed_at)}</dd>
-                    </div>
-                  </dl>
-                </details>
-              </>
-            ) : (
-              <div className="empty-mini">
-                Selecciona una memoria del mapa o una memoria caliente del acordeón para ver su
-                contenido y sus señales internas.
-              </div>
-            )}
-            {detailError ? <p className="notice notice--warning">{detailError}</p> : null}
-          </section>
-
-          <section className="info-card">
-            <div className="section-heading">
-              <div>
-                <p className="section-kicker">Enlaces</p>
-                <h2>{detail?.relation_count ?? 0} conexiones</h2>
-              </div>
-              <span className="soft-pill soft-pill--muted">
-                {metrics ? `${metrics.avg_activation_score.toFixed(2)} media` : "sin media"}
-              </span>
-            </div>
-
-            <div className="relation-stack">
-              {detail?.relations.length ? (
-                detail.relations.map((relation) => (
-                  <button
-                    className="relation-row"
-                    key={relation.id}
-                    onClick={() => focusMemory(relation.other_memory_id)}
-                    type="button"
-                  >
-                    <span className="relation-row__headline">
-                      {relation.relation_type.replace(/_/g, " ")} · {relation.weight.toFixed(2)}
-                    </span>
-                    <span className="relation-row__body">
-                      {relation.other_summary || relation.other_memory_id}
-                    </span>
-                  </button>
-                ))
-              ) : (
-                <div className="empty-mini">
-                  Aquí aparecerán las relaciones más cercanas cuando selecciones una memoria.
-                </div>
-              )}
-            </div>
-          </section>
-
-          <section className="info-card">
-            <div className="section-heading">
-              <div>
-                <p className="section-kicker">Resumen</p>
-                <h2>Lectura rápida del cerebro</h2>
-              </div>
-              <span className="soft-pill soft-pill--muted">
-                {metrics?.bridge_count ?? 0} puentes
-              </span>
-            </div>
-
-            <details className="fold-card" open>
-              <summary>Tipos dominantes</summary>
-              <div className="summary-list">
-                {metrics?.top_memory_types.length ? (
-                  metrics.top_memory_types.map((item) => (
-                    <div className="summary-row" key={item.memory_type}>
-                      <span>{item.memory_type}</span>
-                      <strong>{item.count}</strong>
-                    </div>
-                  ))
-                ) : (
-                  <p>Sin tipos destacados todavía.</p>
-                )}
-              </div>
-            </details>
-
-            <details className="fold-card" open>
-              <summary>Etiquetas más repetidas</summary>
-              <div className="tag-cloud">
-                {topTags.length ? (
-                  topTags.map((item) => (
+                  {shouldShowLabel ? (
                     <button
-                      className="tag-pill"
-                      key={item.tag}
-                      onClick={() => patchControls("tagsInput", item.tag)}
+                      className="brain-region__label"
+                      onClick={() => applyProjectFilter(region.project)}
                       type="button"
                     >
-                      {item.tag}
+                      <span>{region.label}</span>
+                      <small>{region.nodeCount} neuronas</small>
                     </button>
-                  ))
-                ) : (
-                  <p>No hay etiquetas disponibles.</p>
-                )}
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="brain-canvas-shell">
+            <div className="brain-stage__meta">
+              <div>
+                <p className="brain-kicker">AI MEMORY BRAIN</p>
+                <h1>Cerebro navegable</h1>
+                <p className="brain-copy">
+                  El workspace prioriza recorrido visual, foco rápido y lectura del estado vivo de
+                  tus memorias.
+                </p>
               </div>
-            </details>
-          </section>
-        </aside>
-      </section>
+              <div className="brain-status">
+                <span>{graphHasNodes ? `${graphData?.summary.node_count ?? 0} neuronas` : "sin neuronas visibles"}</span>
+                <span>
+                  {graphRefreshPaused
+                    ? "refresco pausado mientras navegas"
+                    : autoRefresh
+                      ? "auto-refresh cada 10s"
+                      : "refresco manual"}
+                </span>
+              </div>
+            </div>
+
+            {graphLoading ? <div className="brain-loading" /> : null}
+            {graphError ? <p className="brain-notice brain-notice--danger">{graphError}</p> : null}
+            {metricsError ? <p className="brain-notice brain-notice--warning">{metricsError}</p> : null}
+            {facetsError ? <p className="brain-notice brain-notice--warning">{facetsError}</p> : null}
+
+            {graphHasNodes ? (
+              <div className="brain-canvas" ref={graphRef} />
+            ) : (
+              <div className="brain-empty">
+                <strong>No hay neuronas para esta combinación.</strong>
+                <p>
+                  Cambia de proyecto, amplía el alcance o limpia filtros para reabrir el cerebro.
+                </p>
+                <div className="brain-empty__actions">
+                  <button className="ghost-button" onClick={clearFilters} type="button">
+                    Reiniciar lectura
+                  </button>
+                  {projects.slice(0, 3).map((item) => (
+                    <button
+                      className="ghost-button"
+                      key={item.project}
+                      onClick={() => applyProjectFilter(item.project)}
+                      type="button"
+                    >
+                      Abrir {item.project}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="brain-legend">
+              <span><i className="legend-dot legend-dot--warm" /> activación</span>
+              <span><i className="legend-dot legend-dot--stable" /> estabilidad</span>
+              <span><i className="legend-dot legend-dot--pin" /> neurona fijada</span>
+              <span><i className="legend-dot legend-dot--inactive" /> enlace inactivo</span>
+            </div>
+
+            {hoveredNode ? (
+              <div
+                className="brain-tooltip"
+                style={{
+                  left: `clamp(16px, ${hoveredNode.x}px, calc(100% - 220px))`,
+                  top: `clamp(16px, ${hoveredNode.y - 18}px, calc(100% - 120px))`,
+                }}
+              >
+                <strong>{hoveredNode.label}</strong>
+                <span>{hoveredNode.project}</span>
+                <small>{hoveredNode.memoryType.replace(/_/g, " ")}</small>
+              </div>
+            ) : null}
+          </div>
+
+          <AnimatePresence>
+            {viewState.dockOpen ? (
+              <motion.section
+                animate={{ opacity: 1, x: 0 }}
+                aria-label="Dock de filtros"
+                className="brain-dock"
+                exit={{ opacity: 0, x: -20 }}
+                initial={{ opacity: 0, x: -28 }}
+                transition={{ duration: 0.28 }}
+              >
+                <div className="panel-header">
+                  <div>
+                    <p className="panel-kicker">Dock</p>
+                    <h2>Filtros neuronales</h2>
+                  </div>
+                  <button
+                    className="ghost-button ghost-button--small"
+                    onClick={() => patchViewState("dockOpen", false)}
+                    type="button"
+                  >
+                    Ocultar
+                  </button>
+                </div>
+
+                <div className="dock-grid">
+                  <label className="brain-field">
+                    <span>Proyecto</span>
+                    <select
+                      value={controls.project}
+                      onChange={(event) => applyProjectFilter(event.target.value)}
+                    >
+                      <option value="">Selecciona un proyecto</option>
+                      {projects.map((item) => (
+                        <option key={item.project} value={item.project}>
+                          {item.project} · {item.memory_count}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label className="brain-field">
+                    <span>Vista</span>
+                    <select
+                      value={controls.mode}
+                      onChange={(event) =>
+                        patchControls("mode", event.target.value as GraphControlsState["mode"])
+                      }
+                    >
+                      <option value="project_hot">Proyecto activo</option>
+                      <option value="search">Buscar ideas</option>
+                      <option value="memory_focus">Memoria en foco</option>
+                    </select>
+                  </label>
+
+                  <label className="brain-field">
+                    <span>Alcance</span>
+                    <select
+                      value={controls.scope}
+                      onChange={(event) =>
+                        patchControls("scope", event.target.value as GraphControlsState["scope"])
+                      }
+                    >
+                      <option value="project">Solo proyecto</option>
+                      <option value="bridged">Proyectos conectados</option>
+                      <option value="global">Global</option>
+                    </select>
+                  </label>
+
+                  <label className="brain-field">
+                    <span>Tipo</span>
+                    <select
+                      value={controls.memoryType}
+                      onChange={(event) => patchControls("memoryType", event.target.value)}
+                    >
+                      <option value="">Todos</option>
+                      {memoryTypes.map((item) => (
+                        <option key={item.memory_type} value={item.memory_type}>
+                          {item.memory_type} · {item.count}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label className="brain-field brain-field--wide">
+                    <span>Búsqueda</span>
+                    <input
+                      placeholder={
+                        controls.mode === "search"
+                          ? "Describe la idea que quieres recuperar"
+                          : "Disponible en modo Buscar ideas"
+                      }
+                      value={controls.query}
+                      onChange={(event) => patchControls("query", event.target.value)}
+                    />
+                  </label>
+
+                  <label className="brain-field">
+                    <span>Etiqueta</span>
+                    <select
+                      value={selectedTag}
+                      onChange={(event) => patchControls("tagsInput", event.target.value)}
+                    >
+                      <option value="">Sin etiqueta</option>
+                      {topTags.map((item) => (
+                        <option key={item.tag} value={item.tag}>
+                          {item.tag} · {item.count}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label className="brain-field">
+                    <span>Memoria focal</span>
+                    <select
+                      value={controls.centerMemoryId}
+                      onChange={(event) => patchControls("centerMemoryId", event.target.value)}
+                    >
+                      <option value="">Elegir memoria caliente</option>
+                      {hotMemories.map((item) => (
+                        <option key={item.memory_id} value={item.memory_id}>
+                          {item.content_preview}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label className="brain-field">
+                    <span>Nodos</span>
+                    <input
+                      max={80}
+                      min={1}
+                      type="number"
+                      value={controls.nodeLimit}
+                      onChange={(event) => onNumberInput("nodeLimit", event)}
+                    />
+                  </label>
+
+                  <label className="brain-field">
+                    <span>Enlaces</span>
+                    <input
+                      max={200}
+                      min={1}
+                      type="number"
+                      value={controls.edgeLimit}
+                      onChange={(event) => onNumberInput("edgeLimit", event)}
+                    />
+                  </label>
+                </div>
+
+                <div className="dock-switches">
+                  <label className="brain-toggle">
+                    <input
+                      checked={controls.includeInactive}
+                      onChange={(event) => patchControls("includeInactive", event.target.checked)}
+                      type="checkbox"
+                    />
+                    <span>Incluir enlaces inactivos</span>
+                  </label>
+                  <label className="brain-toggle">
+                    <input
+                      checked={autoRefresh}
+                      onChange={(event) => setAutoRefresh(event.target.checked)}
+                      type="checkbox"
+                    />
+                    <span>Auto-refresh</span>
+                  </label>
+                </div>
+
+                <div className="dock-actions">
+                  <button className="primary-button" onClick={refreshNow} type="button">
+                    Actualizar ahora
+                  </button>
+                  <button
+                    className="ghost-button"
+                    onClick={() => focusMemory(controls.centerMemoryId || selectedMemoryId)}
+                    type="button"
+                  >
+                    Centrar selección
+                  </button>
+                  <button className="ghost-button" onClick={clearFilters} type="button">
+                    Limpiar
+                  </button>
+                </div>
+
+                <div className="dock-clusters">
+                  <div>
+                    <span className="dock-label">Proyectos vivos</span>
+                    <div className="chip-row">
+                      {projects.slice(0, 6).map((item) => (
+                        <button
+                          className={`brain-chip ${controls.project === item.project ? "brain-chip--active" : ""}`}
+                          key={item.project}
+                          onClick={() => applyProjectFilter(item.project)}
+                          type="button"
+                        >
+                          {item.project}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div>
+                    <span className="dock-label">Etiquetas densas</span>
+                    <div className="chip-row">
+                      {topTags.slice(0, 8).map((item) => (
+                        <button
+                          className={`brain-chip ${selectedTag === item.tag ? "brain-chip--active" : ""}`}
+                          key={item.tag}
+                          onClick={() => patchControls("tagsInput", item.tag)}
+                          type="button"
+                        >
+                          {item.tag}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </motion.section>
+            ) : null}
+          </AnimatePresence>
+
+          <AnimatePresence>
+            {viewState.hudOpen ? (
+              <motion.aside
+                animate={{ opacity: 1, x: 0 }}
+                aria-label="HUD del cerebro"
+                className="brain-hud"
+                exit={{ opacity: 0, x: 20 }}
+                initial={{ opacity: 0, x: 26 }}
+                transition={{ duration: 0.28 }}
+              >
+                <div className="panel-header panel-header--tight">
+                  <div>
+                    <p className="panel-kicker">HUD</p>
+                    <h2>Lectura rápida</h2>
+                  </div>
+                  <button
+                    className="ghost-button ghost-button--small"
+                    onClick={() => patchViewState("hudOpen", false)}
+                    type="button"
+                  >
+                    Ocultar
+                  </button>
+                </div>
+
+                <div className="hud-metrics">
+                  <MetricBadge accent="teal" label="Memorias" value={metrics?.memory_count ?? "—"} />
+                  <MetricBadge
+                    accent="blue"
+                    label="Relaciones activas"
+                    value={metrics?.active_relation_count ?? "—"}
+                  />
+                  <MetricBadge accent="gold" label="Fijadas" value={metrics?.pinned_memory_count ?? "—"} />
+                  <MetricBadge accent="rose" label="Cluster caliente" value={metrics?.hot_memory_count ?? "—"} />
+                </div>
+
+                <div className="hud-stack">
+                  <div className="hud-card">
+                    <span>Proyecto visible</span>
+                    <strong>{activeProject || "sin fijar"}</strong>
+                    <small>
+                      {controls.scope === "global"
+                        ? "visión global"
+                        : controls.scope === "bridged"
+                          ? "con puentes"
+                          : "aislado por proyecto"}
+                    </small>
+                  </div>
+                  <div className="hud-card">
+                    <span>Actividad media</span>
+                    <strong>{formatRatio(metrics?.avg_activation_score)}</strong>
+                    <small>{metrics?.bridge_count ?? 0} puentes entre proyectos</small>
+                  </div>
+                  <div className="hud-card">
+                    <span>Refresco</span>
+                    <strong>{graphLoading ? "cargando" : "estable"}</strong>
+                    <small>
+                      {metrics?.generated_at
+                        ? `métricas ${formatTimestamp(metrics.generated_at)}`
+                        : "sin métrica reciente"}
+                    </small>
+                  </div>
+                </div>
+              </motion.aside>
+            ) : null}
+          </AnimatePresence>
+
+          <AnimatePresence>
+            {viewState.railOpen ? (
+              <motion.section
+                animate={{ opacity: 1, y: 0 }}
+                aria-label="Rail de memorias calientes"
+                className="brain-rail"
+                exit={{ opacity: 0, y: 26 }}
+                initial={{ opacity: 0, y: 28 }}
+                transition={{ duration: 0.32 }}
+              >
+                <div className="panel-header panel-header--tight">
+                  <div>
+                    <p className="panel-kicker">Rail</p>
+                    <h2>Memorias calientes</h2>
+                  </div>
+                  <button
+                    className="ghost-button ghost-button--small"
+                    onClick={() => patchViewState("railOpen", false)}
+                    type="button"
+                  >
+                    Ocultar
+                  </button>
+                </div>
+
+                <div className="rail-scroll">
+                  {hotMemories.map((item) => (
+                    <motion.button
+                      className={`memory-card ${selectedMemoryId === item.memory_id ? "memory-card--active" : ""}`}
+                      key={item.memory_id}
+                      layout
+                      onClick={() => selectMemory(item.memory_id)}
+                      type="button"
+                      whileHover={{ y: -4 }}
+                    >
+                      <span className="memory-card__project">{item.project || "Sin proyecto"}</span>
+                      <strong>{item.content_preview}</strong>
+                      <small>
+                        {(item.memory_type || "general").replace(/_/g, " ")} ·{" "}
+                        {item.prominence.toFixed(2)}
+                      </small>
+                      <span className="memory-card__tags">
+                        {item.tags.slice(0, 2).map((tag) => (
+                          <i key={tag}>{tag}</i>
+                        ))}
+                      </span>
+                      <span className="memory-card__actions">
+                        <span>abrir</span>
+                        <span>centrar</span>
+                      </span>
+                    </motion.button>
+                  ))}
+                </div>
+              </motion.section>
+            ) : null}
+          </AnimatePresence>
+
+          <AnimatePresence>
+            {viewState.drawerOpen ? (
+              <motion.aside
+                animate={{ opacity: 1, x: 0 }}
+                aria-label="Detalle de neurona"
+                className="brain-drawer"
+                exit={{ opacity: 0, x: 36 }}
+                initial={{ opacity: 0, x: 44 }}
+                transition={{ duration: 0.3 }}
+              >
+                <div className="panel-header">
+                  <div>
+                    <p className="panel-kicker">Neurona</p>
+                    <h2>
+                      {detail?.memory.memory_type
+                        ? detail.memory.memory_type.replace(/_/g, " ")
+                        : "Sin selección"}
+                    </h2>
+                  </div>
+                  <div className="drawer-actions">
+                    <button
+                      className="ghost-button ghost-button--small"
+                      onClick={() => focusMemory(selectedMemoryId, detail?.memory.project ?? "")}
+                      type="button"
+                    >
+                      Centrar neurona
+                    </button>
+                    <button
+                      className="ghost-button ghost-button--small"
+                      onClick={closeDrawer}
+                      type="button"
+                    >
+                      Cerrar
+                    </button>
+                  </div>
+                </div>
+
+                {detail ? (
+                  <>
+                    <div className="drawer-summary">
+                      <span className="drawer-pill">{detail.memory.project || "sin proyecto"}</span>
+                      <span className="drawer-pill drawer-pill--muted">
+                        {detail.memory.prominence.toFixed(2)} prominencia
+                      </span>
+                    </div>
+
+                    <p className="drawer-title">{detail.memory.content_preview}</p>
+                    <div className="drawer-body">
+                      {detail.memory.content || detail.memory.summary || "Sin contenido ampliado."}
+                    </div>
+
+                    <div className="signal-grid">
+                      <div className="signal-card">
+                        <span>Accesos</span>
+                        <strong>{detail.memory.access_count}</strong>
+                        <small>frecuencia de consulta</small>
+                      </div>
+                      <div className="signal-card">
+                        <span>Activación</span>
+                        <strong>{detail.memory.activation_score.toFixed(3)}</strong>
+                        <small>calor actual</small>
+                      </div>
+                      <div className="signal-card">
+                        <span>Estabilidad</span>
+                        <strong>{detail.memory.stability_score.toFixed(3)}</strong>
+                        <small>persistencia</small>
+                      </div>
+                      <div className="signal-card">
+                        <span>Último acceso</span>
+                        <strong>{formatTimestamp(detail.memory.last_accessed_at)}</strong>
+                        <small>fecha exacta en detalle</small>
+                      </div>
+                    </div>
+
+                    <div className="drawer-section">
+                      <div className="drawer-section__header">
+                        <span>Filtros rápidos</span>
+                      </div>
+                      <div className="chip-row">
+                        {detail.memory.project ? (
+                          <button
+                            className="brain-chip"
+                            onClick={() => applyProjectFilter(detail.memory.project || "")}
+                            type="button"
+                          >
+                            {detail.memory.project}
+                          </button>
+                        ) : null}
+                        {detail.memory.memory_type ? (
+                          <button
+                            className="brain-chip"
+                            onClick={() => patchControls("memoryType", detail.memory.memory_type || "")}
+                            type="button"
+                          >
+                            {detail.memory.memory_type.replace(/_/g, " ")}
+                          </button>
+                        ) : null}
+                        {detail.memory.tags.map((tag) => (
+                          <button
+                            className="brain-chip"
+                            key={tag}
+                            onClick={() => patchControls("tagsInput", tag)}
+                            type="button"
+                          >
+                            {tag}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="drawer-section">
+                      <div className="drawer-section__header">
+                        <span>{detail.relation_count} conexiones cercanas</span>
+                      </div>
+                      <div className="relation-stack">
+                        {detail.relations.length ? (
+                          detail.relations.map((relation) => (
+                            <button
+                              className="relation-row"
+                              key={relation.id}
+                              onClick={() =>
+                                focusMemory(relation.other_memory_id, relation.other_project ?? "")
+                              }
+                              type="button"
+                            >
+                              <span className="relation-row__headline">
+                                {relation.relation_type.replace(/_/g, " ")} ·{" "}
+                                {relation.weight.toFixed(2)}
+                              </span>
+                              <span className="relation-row__body">
+                                {relation.other_summary || relation.other_memory_id}
+                              </span>
+                              <small>{relation.other_project || "sin proyecto"}</small>
+                            </button>
+                          ))
+                        ) : (
+                          <div className="drawer-empty">
+                            Aquí aparecerán las conexiones más cercanas de la neurona actual.
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </>
+                ) : (
+                  <div className="drawer-empty">
+                    Selecciona una neurona del canvas o del rail para abrir su lectura completa.
+                  </div>
+                )}
+                {detailError ? <p className="brain-notice brain-notice--warning">{detailError}</p> : null}
+              </motion.aside>
+            ) : null}
+          </AnimatePresence>
+        </motion.section>
+      </div>
     </div>
   );
 }

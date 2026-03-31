@@ -15,17 +15,21 @@ from openai import AsyncOpenAI
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("reflection-worker")
 
-POSTGRES_URL = os.environ["POSTGRES_URL"]
-REDIS_URL = os.environ["REDIS_URL"]
-API_SERVER_URL = os.environ["API_SERVER_URL"]
-API_KEY = os.environ["API_KEY"]
-MEM0_URL = os.environ["MEM0_URL"]
-DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
-DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-reasoner")
-DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+def env_text(name: str, default: str = "") -> str:
+    return os.environ.get(name, default).strip()
+
+
+POSTGRES_URL = os.environ["POSTGRES_URL"].strip()
+REDIS_URL = os.environ["REDIS_URL"].strip()
+API_SERVER_URL = os.environ["API_SERVER_URL"].strip()
+API_KEY = os.environ["API_KEY"].strip()
+MEM0_URL = os.environ["MEM0_URL"].strip()
+DEEPSEEK_API_KEY = env_text("DEEPSEEK_API_KEY", "")
+DEEPSEEK_MODEL = env_text("DEEPSEEK_MODEL", "deepseek-reasoner")
+DEEPSEEK_BASE_URL = env_text("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 REFLECTION_INTERVAL = int(os.environ.get("REFLECTION_INTERVAL_SECONDS", "21600"))
 REFLECTION_POLL_INTERVAL = int(os.environ.get("REFLECTION_POLL_INTERVAL_SECONDS", "30"))
-WORKER_HEARTBEAT_KEY = os.environ.get("WORKER_HEARTBEAT_KEY", "reflection_worker:heartbeat")
+WORKER_HEARTBEAT_KEY = env_text("WORKER_HEARTBEAT_KEY", "reflection_worker:heartbeat")
 WORKER_HEARTBEAT_TTL = int(os.environ.get("WORKER_HEARTBEAT_TTL_SECONDS", "120"))
 AI_MEMORY_TEST_MODE = os.environ.get("AI_MEMORY_TEST_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
 AI_MEMORY_TEST_NOW = os.environ.get("AI_MEMORY_TEST_NOW", "").strip()

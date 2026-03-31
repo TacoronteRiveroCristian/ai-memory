@@ -14,20 +14,24 @@ logger = logging.getLogger("ai-memory-mem0")
 
 load_dotenv()
 
-POSTGRES_HOST = os.environ.get("POSTGRES_HOST", "postgres")
-POSTGRES_PORT = os.environ.get("POSTGRES_PORT", "5432")
-POSTGRES_DB = os.environ.get("POSTGRES_DB", "postgres")
-POSTGRES_USER = os.environ.get("POSTGRES_USER", "postgres")
-POSTGRES_PASSWORD = os.environ.get("POSTGRES_PASSWORD", "postgres")
-POSTGRES_COLLECTION_NAME = os.environ.get("POSTGRES_COLLECTION_NAME", "memories")
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-OPENAI_EMBEDDING_MODEL = os.environ.get("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
-DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
-DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-reasoner")
-DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
-HISTORY_DB_PATH = os.environ.get("HISTORY_DB_PATH", "/app/history/history.db")
+def env_text(name: str, default: str = "") -> str:
+    return os.environ.get(name, default).strip()
+
+
+POSTGRES_HOST = env_text("POSTGRES_HOST", "postgres")
+POSTGRES_PORT = env_text("POSTGRES_PORT", "5432")
+POSTGRES_DB = env_text("POSTGRES_DB", "postgres")
+POSTGRES_USER = env_text("POSTGRES_USER", "postgres")
+POSTGRES_PASSWORD = env_text("POSTGRES_PASSWORD", "postgres")
+POSTGRES_COLLECTION_NAME = env_text("POSTGRES_COLLECTION_NAME", "memories")
+OPENAI_API_KEY = env_text("OPENAI_API_KEY")
+OPENAI_EMBEDDING_MODEL = env_text("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
+DEEPSEEK_API_KEY = env_text("DEEPSEEK_API_KEY")
+DEEPSEEK_MODEL = env_text("DEEPSEEK_MODEL", "deepseek-reasoner")
+DEEPSEEK_BASE_URL = env_text("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+HISTORY_DB_PATH = env_text("HISTORY_DB_PATH", "/app/history/history.db")
 MEM0_GRAPH_ENABLED = os.environ.get("MEM0_GRAPH_ENABLED", "true").strip().lower() not in {"0", "false", "no", "off"}
-MEM0_GRAPH_DB_PATH = os.environ.get("MEM0_GRAPH_DB_PATH", "/app/history/graph.kuzu")
+MEM0_GRAPH_DB_PATH = env_text("MEM0_GRAPH_DB_PATH", "/app/history/graph.kuzu")
 
 os.makedirs(os.path.dirname(HISTORY_DB_PATH), exist_ok=True)
 os.makedirs(os.path.dirname(MEM0_GRAPH_DB_PATH), exist_ok=True)
