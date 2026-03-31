@@ -72,6 +72,27 @@ TAG_NORMALIZE_RE = re.compile(r"[^a-z0-9/_-]+")
 TOKEN_RE = re.compile(r"[a-z0-9_/-]+")
 AUTO_LINK_CANDIDATE_LIMIT = 6
 AUTO_LINK_SCORE_THRESHOLD = 0.78
+ACTIVATION_PROPAGATION_TTL = 900          # 15 min en Redis
+ACTIVATION_PROPAGATION_DECAY = 0.4        # factor de decaimiento por salto
+DEEP_SLEEP_INTERVAL = int(os.environ.get("DEEP_SLEEP_INTERVAL_SECONDS", "86400"))  # 24h
+PG_POOL_MAX_SIZE = int(os.environ.get("PG_POOL_MAX_SIZE", "8"))
+PG_POOL_MIN_SIZE = int(os.environ.get("PG_POOL_MIN_SIZE", "1"))
+# [2] Valencia: keywords para inferencia heurística de carga emocional
+_NEGATIVE_KEYWORDS = frozenset({
+    "error", "fallo", "fail", "bug", "problema", "issue", "crash", "broken",
+    "exception", "traceback", "critical", "fatal", "bloqueo", "timeout",
+    "corrupt", "corrupted", "perdida", "data loss",
+})
+_POSITIVE_KEYWORDS = frozenset({
+    "solucion", "solution", "exito", "success", "completado", "fixed",
+    "implementado", "funcionando", "resuelto", "optimizado", "mejorado",
+    "deployed", "lanzado", "done", "achieved",
+})
+_HIGH_AROUSAL_KEYWORDS = frozenset({
+    "critical", "fatal", "emergency", "urgente", "bloqueante", "showstopper",
+    "crash", "corruption", "breakthrough", "hito", "milestone", "discovery",
+    "revelation",
+})
 AI_MEMORY_TEST_MODE = os.environ.get("AI_MEMORY_TEST_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
 AI_MEMORY_TEST_NOW = os.environ.get("AI_MEMORY_TEST_NOW", "").strip()
 SESSION_MEM0_TIMEOUT_SECONDS = min(MEM0_INGEST_TIMEOUT_SECONDS, 5.0) if AI_MEMORY_TEST_MODE else MEM0_INGEST_TIMEOUT_SECONDS
@@ -92,6 +113,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request: Request, exc: Exception):
+    logger.exception("Unhandled exception %s %s", request.method, request.url.path)
+    return JSONResponse(status_code=500, content={"detail": "internal_error"})
 mcp = FastMCP(
     "AIMemoryBrain",
     streamable_http_path="/",
@@ -198,6 +225,7 @@ class BridgeProjectsRequest(BaseModel):
 
 class StructuredSearchRequest(SearchMemoryRequest):
     register_access: bool = False
+    chain_hops: int = Field(default=0, ge=0, le=2)
 
 
 class TestClockRequest(BaseModel):
@@ -423,6 +451,25 @@ def clamp01(value: float) -> float:
     return max(0.0, min(1.0, value))
 
 
+def _kw_match(kw: str, text: str) -> bool:
+    """Matching preciso con word boundary para palabras simples, substring para frases."""
+    if " " in kw:
+        return kw in text
+    return bool(re.search(r"\b" + re.escape(kw) + r"\b", text))
+
+
+def infer_valence_arousal(content: str) -> tuple[float, float]:
+    """[2] Infiere valencia (-1..+1) y arousal (0..1) del contenido de forma heurística."""
+    text = content.lower()
+    neg = sum(1 for kw in _NEGATIVE_KEYWORDS if _kw_match(kw, text))
+    pos = sum(1 for kw in _POSITIVE_KEYWORDS if _kw_match(kw, text))
+    high = sum(1 for kw in _HIGH_AROUSAL_KEYWORDS if _kw_match(kw, text))
+    raw_valence = pos * 0.3 - neg * 0.3
+    valence = max(-1.0, min(1.0, raw_valence))
+    arousal = clamp01(0.4 + high * 0.2 + abs(valence) * 0.3)
+    return round(valence, 3), round(arousal, 3)
+
+
 def parse_result_fields(result: str) -> dict[str, str]:
     fields: dict[str, str] = {}
     for token in result.split():
@@ -538,6 +585,16 @@ async def run_schema_migrations():
         "ALTER TABLE memory_log ADD COLUMN IF NOT EXISTS activation_score FLOAT DEFAULT 0",
         "ALTER TABLE memory_log ADD COLUMN IF NOT EXISTS stability_score FLOAT DEFAULT 0.5",
         "ALTER TABLE memory_log ADD COLUMN IF NOT EXISTS manual_pin BOOLEAN DEFAULT FALSE",
+        # [1] Ebbinghaus
+        "ALTER TABLE memory_log ADD COLUMN IF NOT EXISTS review_count INT DEFAULT 0",
+        "ALTER TABLE memory_log ADD COLUMN IF NOT EXISTS stability_halflife_days FLOAT DEFAULT 1.0",
+        # [2] Valencia emocional
+        "ALTER TABLE memory_log ADD COLUMN IF NOT EXISTS valence FLOAT DEFAULT 0.0",
+        "ALTER TABLE memory_log ADD COLUMN IF NOT EXISTS arousal FLOAT DEFAULT 0.5",
+        # [3] Sesgo de novedad
+        "ALTER TABLE memory_log ADD COLUMN IF NOT EXISTS novelty_score FLOAT DEFAULT 0.5",
+        # [6] Abstraction level para schemas
+        "ALTER TABLE memory_log ADD COLUMN IF NOT EXISTS abstraction_level INT DEFAULT 0",
         """
         CREATE TABLE IF NOT EXISTS memory_relations (
             id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -579,6 +636,52 @@ async def run_schema_migrations():
         "CREATE INDEX IF NOT EXISTS idx_memory_log_hotspots ON memory_log(project_id, manual_pin DESC, activation_score DESC, stability_score DESC, last_accessed_at DESC, created_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_project_bridges_project ON project_bridges(project_id, active)",
         "CREATE INDEX IF NOT EXISTS idx_project_bridges_related ON project_bridges(related_project_id, active)",
+        # [2][3] Índices para valencia, arousal y novelty
+        "CREATE INDEX IF NOT EXISTS idx_memory_log_arousal ON memory_log(project_id, arousal DESC) WHERE arousal > 0.6",
+        "CREATE INDEX IF NOT EXISTS idx_memory_log_novelty ON memory_log(project_id, novelty_score DESC) WHERE novelty_score > 0.6",
+        # [7] Tabla de contradicciones
+        """
+        CREATE TABLE IF NOT EXISTS contradiction_queue (
+            id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+            memory_a_id UUID REFERENCES memory_log(id) ON DELETE CASCADE,
+            memory_b_id UUID REFERENCES memory_log(id) ON DELETE CASCADE,
+            resolution_status VARCHAR(20) DEFAULT 'pending',
+            resolution_type VARCHAR(30),
+            resolution_memory_id UUID REFERENCES memory_log(id) ON DELETE SET NULL,
+            condition_text TEXT,
+            resolved_at TIMESTAMPTZ,
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            CONSTRAINT contradiction_queue_unique UNIQUE (memory_a_id, memory_b_id)
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_contradiction_pending ON contradiction_queue(resolution_status) WHERE resolution_status = 'pending'",
+        # [6] Tabla de fuentes de esquemas
+        """
+        CREATE TABLE IF NOT EXISTS schema_sources (
+            id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+            schema_memory_id UUID REFERENCES memory_log(id) ON DELETE CASCADE,
+            source_memory_id UUID REFERENCES memory_log(id) ON DELETE CASCADE,
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            CONSTRAINT schema_sources_unique UNIQUE (schema_memory_id, source_memory_id)
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_schema_sources_schema ON schema_sources(schema_memory_id)",
+        # [8] Tabla de deep sleep runs
+        """
+        CREATE TABLE IF NOT EXISTS deep_sleep_runs (
+            id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+            status VARCHAR(20) NOT NULL DEFAULT 'running',
+            memories_scanned INT DEFAULT 0,
+            schemas_created INT DEFAULT 0,
+            contradictions_resolved INT DEFAULT 0,
+            memories_pruned INT DEFAULT 0,
+            relations_reinforced INT DEFAULT 0,
+            error TEXT,
+            started_at TIMESTAMPTZ DEFAULT NOW(),
+            finished_at TIMESTAMPTZ
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_deep_sleep_runs_status ON deep_sleep_runs(status, started_at DESC)",
         "DROP TRIGGER IF EXISTS update_memory_relations_updated_at ON memory_relations",
         """
         CREATE TRIGGER update_memory_relations_updated_at BEFORE UPDATE ON memory_relations
@@ -591,8 +694,9 @@ async def run_schema_migrations():
         """,
     ]
     async with pg_pool.acquire() as conn:
-        for statement in statements:
-            await conn.execute(statement)
+        async with conn.transaction():
+            for statement in statements:
+                await conn.execute(statement)
 
 
 async def ensure_project(project_name: str) -> Optional[uuid.UUID]:
@@ -683,7 +787,13 @@ async def fetch_memory_records(memory_ids: list[str]) -> dict[str, dict[str, Any
                 ml.last_accessed_at,
                 ml.activation_score,
                 ml.stability_score,
-                ml.manual_pin
+                ml.manual_pin,
+                COALESCE(ml.review_count, 0) AS review_count,
+                COALESCE(ml.stability_halflife_days, 1.0) AS stability_halflife_days,
+                COALESCE(ml.valence, 0.0) AS valence,
+                COALESCE(ml.arousal, 0.5) AS arousal,
+                COALESCE(ml.novelty_score, 0.5) AS novelty_score,
+                COALESCE(ml.abstraction_level, 0) AS abstraction_level
             FROM memory_log ml
             LEFT JOIN projects p ON p.id = ml.project_id
             WHERE ml.id = ANY($1::uuid[])
@@ -707,6 +817,12 @@ async def fetch_memory_records(memory_ids: list[str]) -> dict[str, dict[str, Any
             "activation_score": float(row["activation_score"] or 0.0),
             "stability_score": float(row["stability_score"] or 0.5),
             "manual_pin": bool(row["manual_pin"]),
+            "review_count": int(row["review_count"] or 0),
+            "stability_halflife_days": float(row["stability_halflife_days"] or 1.0),
+            "valence": float(row["valence"] or 0.0),
+            "arousal": float(row["arousal"] or 0.5),
+            "novelty_score": float(row["novelty_score"] or 0.5),
+            "abstraction_level": int(row["abstraction_level"] or 0),
         }
     return records
 
@@ -734,12 +850,17 @@ def compute_memory_prominence(record: dict[str, Any]) -> float:
         record.get("last_accessed_at"),
     )
     manual_boost = 1.0 if record.get("manual_pin") else 0.0
+    # [2] Valencia emocional: memorias con alta carga afectiva son más prominentes
+    arousal = float(record.get("arousal", 0.5) or 0.5)
+    valence_abs = abs(float(record.get("valence", 0.0) or 0.0))
     prominence = clamp01(
         0.34 * manual_boost
-        + 0.24 * float(record.get("activation_score", 0.0) or 0.0)
-        + 0.18 * float(record.get("stability_score", 0.5) or 0.5)
-        + 0.14 * recency_frequency
-        + 0.10 * float(record.get("importance", 0.5) or 0.5)
+        + 0.22 * float(record.get("activation_score", 0.0) or 0.0)
+        + 0.16 * float(record.get("stability_score", 0.5) or 0.5)
+        + 0.12 * recency_frequency
+        + 0.08 * float(record.get("importance", 0.5) or 0.5)
+        + 0.05 * arousal
+        + 0.03 * valence_abs
     )
     return round(prominence, 4)
 
@@ -902,6 +1023,20 @@ async def upsert_memory_relation(
                 """,
                 [uuid.UUID(source_id), uuid.UUID(target_id)],
             )
+        # [7] Encolar contradicción dentro de la misma conexión, sin overhead de segunda adquisición
+        if relation_type == "contradicts":
+            try:
+                await conn.execute(
+                    """
+                    INSERT INTO contradiction_queue (memory_a_id, memory_b_id)
+                    VALUES ($1::uuid, $2::uuid)
+                    ON CONFLICT (memory_a_id, memory_b_id) DO NOTHING
+                    """,
+                    uuid.UUID(source_id),
+                    uuid.UUID(target_id),
+                )
+            except Exception as exc:
+                logger.debug("Error encolando contradiccion: %s", exc)
     return serialize_row(row) or {}
 
 
@@ -940,6 +1075,158 @@ async def decay_project_relations(project_name: str, stale_days: int = 21) -> in
     return int(result.split()[-1])
 
 
+async def decay_memory_stability(project_name: str) -> int:
+    """[1] Aplica decay exponencial (Ebbinghaus) a stability_score de memorias no accedidas.
+    Las memorias con arousal > 0.7 o manual_pin están protegidas."""
+    if not pg_pool or not project_name:
+        return 0
+    current_time = now_utc()
+    async with pg_pool.acquire() as conn:
+        result = await conn.execute(
+            """
+            UPDATE memory_log ml
+            SET stability_score = GREATEST(
+                0.05,
+                ml.stability_score * exp(
+                    -EXTRACT(EPOCH FROM ($2::timestamptz - COALESCE(ml.last_accessed_at, ml.created_at))) / 86400.0
+                    / GREATEST(1.0, COALESCE(ml.stability_halflife_days, 1.0))
+                )
+            )
+            FROM projects p
+            WHERE p.id = ml.project_id
+              AND p.name = $1
+              AND ml.manual_pin = FALSE
+              AND COALESCE(ml.arousal, 0.5) <= 0.7
+              AND EXTRACT(EPOCH FROM ($2::timestamptz - COALESCE(ml.last_accessed_at, ml.created_at))) / 86400.0
+                  >= GREATEST(1.0, COALESCE(ml.stability_halflife_days, 1.0)) * 0.5
+            """,
+            project_name,
+            current_time,
+        )
+    return int(result.split()[-1]) if result else 0
+
+
+async def propagate_activation(memory_id: str, depth: int = 2, decay_factor: float = ACTIVATION_PROPAGATION_DECAY) -> int:
+    """[4] Spreading activation: propaga energía de activación hacia memorias vecinas vía relaciones.
+    La energía se almacena en Redis con TTL de 15 min para usarse como priming en búsquedas."""
+    if not pg_pool or not redis_client:
+        return 0
+    frontier: list[tuple[str, float]] = [(memory_id, 1.0)]
+    visited: dict[str, float] = {memory_id: 1.0}
+    propagated_count = 0
+    async with pg_pool.acquire() as conn:
+        for _ in range(depth):
+            if not frontier:
+                break
+            frontier_ids = [uuid.UUID(mid) for mid, _ in frontier]
+            energy_map = {mid: energy for mid, energy in frontier}
+            rows = await conn.fetch(
+                """
+                SELECT source_memory_id::text AS src, target_memory_id::text AS tgt, weight
+                FROM memory_relations
+                WHERE active = TRUE
+                  AND (source_memory_id = ANY($1::uuid[]) OR target_memory_id = ANY($1::uuid[]))
+                """,
+                frontier_ids,
+            )
+            next_frontier: list[tuple[str, float]] = []
+            for row in rows:
+                src, tgt, weight = str(row["src"]), str(row["tgt"]), float(row["weight"])
+                if src in energy_map:
+                    neighbor, source_energy = tgt, energy_map[src]
+                else:
+                    neighbor, source_energy = src, energy_map.get(tgt, 0.0)
+                propagated_energy = source_energy * decay_factor * weight
+                if propagated_energy < 0.05:
+                    continue
+                if propagated_energy > visited.get(neighbor, 0.0):
+                    visited[neighbor] = propagated_energy
+                    next_frontier.append((neighbor, propagated_energy))
+                    propagated_count += 1
+            frontier = next_frontier
+    # Escribir activación propagada en Redis con TTL
+    try:
+        pipeline = redis_client.pipeline()
+        for mid, energy in visited.items():
+            if mid == memory_id:
+                continue
+            pipeline.set(f"activation_propagation:{mid}", str(round(energy, 4)), ex=ACTIVATION_PROPAGATION_TTL)
+        await pipeline.execute()
+    except Exception as exc:
+        logger.debug("Error escribiendo activacion propagada en Redis: %s", exc)
+    return propagated_count
+
+
+async def expand_search_with_hops(
+    base_results: list[dict[str, Any]],
+    chain_hops: int,
+    allowed_projects: set[str],
+    exclude_ids: set[str],
+    limit: int,
+) -> list[dict[str, Any]]:
+    """[5] Expande resultados de búsqueda siguiendo relaciones activas (associative chaining).
+    Resultados en hop N tienen score *= 0.7^N respecto al resultado semántico original."""
+    if chain_hops == 0 or not base_results or not pg_pool:
+        return base_results
+    all_results: dict[str, dict[str, Any]] = {item["id"]: item for item in base_results}
+    current_hop_ids = [item["id"] for item in base_results[:3]]
+    for hop in range(1, chain_hops + 1):
+        if not current_hop_ids:
+            break
+        hop_discount = 0.7 ** hop
+        async with pg_pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT source_memory_id::text AS src, target_memory_id::text AS tgt, weight
+                FROM memory_relations
+                WHERE active = TRUE
+                  AND weight > 0.35
+                  AND (source_memory_id = ANY($1::uuid[]) OR target_memory_id = ANY($1::uuid[]))
+                ORDER BY weight DESC
+                LIMIT 24
+                """,
+                [uuid.UUID(mid) for mid in current_hop_ids],
+            )
+        neighbor_ids: list[str] = []
+        for row in rows:
+            for nid in (str(row["src"]), str(row["tgt"])):
+                if nid not in all_results and nid not in exclude_ids:
+                    neighbor_ids.append(nid)
+        if not neighbor_ids:
+            break
+        # Cap neighbors per hop to prevent exponential growth
+        neighbor_ids = list(dict.fromkeys(neighbor_ids))[:12]
+        neighbor_records = await fetch_memory_records(neighbor_ids)
+        for mid, record in neighbor_records.items():
+            if allowed_projects and record.get("project") not in allowed_projects:
+                continue
+            base_score = float(record.get("activation_score", 0.0) or 0.0)
+            hop_score = round(max(base_score, 0.35) * hop_discount, 4)
+            all_results[mid] = {
+                "id": mid,
+                "project": record.get("project", ""),
+                "memory_type": record.get("memory_type", "general"),
+                "content": record.get("content", record.get("summary", "")),
+                "tags": record.get("tags", []),
+                "semantic_score": 0.0,
+                "hybrid_score": hop_score,
+                "relation_weight": 0.0,
+                "recency_frequency": compute_recency_frequency(
+                    int(record.get("access_count", 0)),
+                    record.get("last_accessed_at"),
+                ),
+                "tag_overlap": 0.0,
+                "importance": float(record.get("importance", 0.5) or 0.5),
+                "stability_score": float(record.get("stability_score", 0.5) or 0.5),
+                "manual_pin": bool(record.get("manual_pin", False)),
+                "hop_distance": hop,
+            }
+        current_hop_ids = list(dict.fromkeys(neighbor_ids))
+    combined = list(all_results.values())
+    combined.sort(key=lambda x: (x.get("hybrid_score", 0.0), x.get("semantic_score", 0.0)), reverse=True)
+    return combined[:limit]
+
+
 async def register_memory_access(results: list[dict[str, Any]]):
     if not pg_pool or not results:
         return
@@ -965,6 +1252,11 @@ async def register_memory_access(results: list[dict[str, Any]]):
                 stability_score = CASE
                     WHEN ml.manual_pin THEN 1.0
                     ELSE LEAST(1.0, GREATEST(COALESCE(ml.stability_score, 0.3), updates.stability_score))
+                END,
+                review_count = COALESCE(ml.review_count, 0) + 1,
+                stability_halflife_days = CASE
+                    WHEN ml.manual_pin THEN COALESCE(ml.stability_halflife_days, 1.0)
+                    ELSE LEAST(512.0, COALESCE(ml.stability_halflife_days, 1.0) * 2.0)
                 END
             FROM updates
             WHERE ml.id = updates.id
@@ -986,6 +1278,7 @@ async def structured_search_memories(
     tags: str | list[str] = "",
     score_threshold: float = 0.35,
     exclude_memory_ids: Optional[list[str]] = None,
+    chain_hops: int = 0,
 ) -> list[dict[str, Any]]:
     normalized_scope = validate_search_scope(scope)
     normalized_tags = normalize_tags(tags)
@@ -1022,6 +1315,23 @@ async def structured_search_memories(
     metadata = await fetch_memory_records([str(point.id) for point in points])
     relation_weights = await fetch_incident_relation_weights([str(point.id) for point in points])
 
+    # [4] Spreading Activation: cargar bonuses de priming desde Redis de una vez
+    propagation_bonuses: dict[str, float] = {}
+    if redis_client and points:
+        try:
+            pipe = redis_client.pipeline()
+            point_ids = [str(p.id) for p in points]
+            for pid in point_ids:
+                pipe.get(f"activation_propagation:{pid}")
+            prop_values = await pipe.execute()
+            propagation_bonuses = {
+                pid: clamp01(float(val))
+                for pid, val in zip(point_ids, prop_values)
+                if val is not None
+            }
+        except Exception as exc:
+            logger.debug("Error leyendo activacion propagada de Redis: %s", exc)
+
     results: list[dict[str, Any]] = []
     for point in points:
         memory_id = str(point.id)
@@ -1041,6 +1351,8 @@ async def structured_search_memories(
         relation_weight = clamp01(float(relation_weights.get(memory_id, 0.0)))
         tag_overlap = compute_tag_overlap(normalized_tags, memory_tags)
         semantic_relevance = clamp01(float(point.score))
+        # [4] Propagation bonus desde spreading activation
+        propagation_bonus = propagation_bonuses.get(memory_id, 0.0)
         hybrid_score = round(
             clamp01(
                 0.5 * semantic_relevance
@@ -1050,6 +1362,8 @@ async def structured_search_memories(
             ),
             4,
         )
+        if propagation_bonus > 0.0:
+            hybrid_score = round(clamp01(hybrid_score + 0.15 * propagation_bonus), 4)
         details = meta.get("content") or payload.get("content") or ""
         results.append(
             {
@@ -1069,7 +1383,11 @@ async def structured_search_memories(
             }
         )
     results.sort(key=lambda item: (item["hybrid_score"], item["semantic_score"], item["importance"]), reverse=True)
-    return results[:limit]
+    base_results = results[:limit]
+    # [5] Multi-hop: expandir siguiendo relaciones si se solicita chain_hops > 0
+    if chain_hops > 0:
+        return await expand_search_with_hops(base_results, chain_hops, allowed_projects, exclude_ids, limit)
+    return base_results
 
 
 async def classify_relation_with_llm(
@@ -1463,6 +1781,16 @@ async def get_memory_detail_payload(memory_id: str) -> Optional[dict[str, Any]]:
             "stability_score": round(float(serialized.get("stability_score", 0.5) or 0.5), 4),
             "manual_pin": bool(serialized.get("manual_pin", False)),
             "prominence": compute_memory_prominence(record),
+            # [1] Ebbinghaus
+            "review_count": int(serialized.get("review_count", 0) or 0),
+            "stability_halflife_days": round(float(serialized.get("stability_halflife_days", 1.0) or 1.0), 3),
+            # [2] Valencia emocional
+            "valence": round(float(serialized.get("valence", 0.0) or 0.0), 3),
+            "arousal": round(float(serialized.get("arousal", 0.5) or 0.5), 3),
+            # [3] Novedad
+            "novelty_score": round(float(serialized.get("novelty_score", 0.5) or 0.5), 3),
+            # [6] Abstracción
+            "abstraction_level": int(serialized.get("abstraction_level", 0) or 0),
         },
         "relation_count": len(relations),
         "relations": relations[:20],
@@ -1975,6 +2303,10 @@ async def apply_session_plasticity(payload: SessionSummaryRequest) -> dict[str, 
         await register_memory_access(selected)
         reinforced_pairs = await reinforce_relation_pairs([item["id"] for item in selected], weight_delta=0.015)
 
+        # [4] Spreading activation desde las memorias activadas
+        for mem in selected[:3]:
+            asyncio.create_task(propagate_activation(mem["id"]))
+
         primary = selected[0]
         primary_source = {
             "id": primary["id"],
@@ -2003,11 +2335,14 @@ async def apply_session_plasticity(payload: SessionSummaryRequest) -> dict[str, 
         )
         expanded_links = len(expanded)
     decayed = await decay_project_relations(payload.project)
+    # [1] Ebbinghaus: decay exponencial de stability_score para memorias no accedidas
+    decayed_stability = await decay_memory_stability(payload.project)
     return {
         "activated_memories": len(selected),
         "reinforced_pairs": reinforced_pairs,
         "expanded_links": expanded_links,
         "decayed_relations": decayed,
+        "decayed_stability": decayed_stability,
     }
 
 async def mem0_health() -> bool:
@@ -2387,6 +2722,26 @@ async def store_memory(
 
         embedding = await get_embedding(content)
         memory_id = str(uuid.uuid4())
+        # [2] Valencia emocional: inferir carga afectiva del contenido
+        valence, arousal = infer_valence_arousal(content)
+        # [3] Sesgo de novedad: ajustar importance según similitud con memorias existentes
+        novelty_score = 0.5
+        try:
+            novelty_candidates = await structured_search_memories(
+                query=content, project=project, limit=1, scope="project", score_threshold=0.25,
+            )
+            if novelty_candidates:
+                max_sim = novelty_candidates[0]["semantic_score"]
+                novelty_score = round(1.0 - max_sim, 3)
+                if max_sim < 0.50:
+                    importance = min(1.0, importance + 0.15 * novelty_score)
+                elif max_sim > 0.90 and not skip_similar:
+                    importance = max(0.3, importance - 0.1)
+            else:
+                novelty_score = 0.9
+                importance = min(1.0, importance + 0.08)
+        except Exception:
+            logger.debug("Calculo de novelty_score fallo, usando default")
         payload = {
             "content": content,
             "project_id": project,
@@ -2396,6 +2751,9 @@ async def store_memory(
             "importance": importance,
             "created_at": now_iso(),
             "access_count": 0,
+            "valence": valence,
+            "arousal": arousal,
+            "novelty_score": novelty_score,
         }
         await qdrant.upsert(
             collection_name=COLLECTION_NAME,
@@ -2408,12 +2766,14 @@ async def store_memory(
                     INSERT INTO memory_log
                     (
                         id, project_id, agent_id, action_type, summary, details, importance, tags,
-                        access_count, activation_score, stability_score, manual_pin
+                        access_count, activation_score, stability_score, manual_pin,
+                        valence, arousal, novelty_score, review_count, stability_halflife_days
                     )
                     VALUES (
                         $1,
                         (SELECT id FROM projects WHERE name = $2 LIMIT 1),
-                        $3, $4, $5, $6::jsonb, $7, $8, 0, 0, $9, FALSE
+                        $3, $4, $5, $6::jsonb, $7, $8, 0, 0, $9, FALSE,
+                        $10, $11, $12, 0, 1.0
                     )
                     ON CONFLICT DO NOTHING
                     """,
@@ -2426,6 +2786,9 @@ async def store_memory(
                     importance,
                     tags_list,
                     clamp01(max(importance, 0.35)),
+                    valence,
+                    arousal,
+                    novelty_score,
                 )
         try:
             await auto_link_memory(
@@ -3295,8 +3658,8 @@ async def initialize_app_state():
     async def init_postgres():
         return await asyncpg.create_pool(
             POSTGRES_URL,
-            min_size=1,
-            max_size=8,
+            min_size=PG_POOL_MIN_SIZE,
+            max_size=PG_POOL_MAX_SIZE,
             command_timeout=30,
         )
 
