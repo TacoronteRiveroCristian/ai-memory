@@ -35,7 +35,7 @@ brain-check:
 	KEEP_STACK_UP=$(KEEP_STACK_UP) AI_MEMORY_TEST_NOW_OVERRIDE=$(TEST_NOW) ./scripts/run_deterministic_suite.sh
 
 demo-up:
-	AI_MEMORY_TEST_MODE=true AI_MEMORY_TEST_NOW=$(TEST_NOW) ./scripts/demo_compose.sh up -d --build qdrant postgres redis mem0 api-server reflection-worker ui
+	AI_MEMORY_TEST_MODE=true AI_MEMORY_TEST_NOW=$(TEST_NOW) ./scripts/demo_compose.sh up -d --build qdrant postgres redis mem0 api-server reflection-worker
 
 demo-seed:
 	SANITIZED_ENV=$$(mktemp); tr -d '\r' < .env > $$SANITIZED_ENV; source $$SANITIZED_ENV && AI_MEMORY_BASE_URL=http://127.0.0.1:8050 $(PYTHON) scripts/seed_demo_brain.py --base-url http://127.0.0.1:8050 --api-key $$MEMORY_API_KEY --deterministic --with-plasticity; rm -f $$SANITIZED_ENV
@@ -43,9 +43,6 @@ demo-seed:
 demo-check:
 	AI_MEMORY_TEST_NOW_OVERRIDE=$(TEST_NOW) ./scripts/run_demo_brain.sh
 	AI_MEMORY_BASE_URL=http://127.0.0.1:8050 $(PYTHON) -m pytest -q tests/test_demo_brain_dataset.py
-	cd ui && npm install
-	cd ui && npx playwright install chromium
-	cd ui && UI_BASE_URL=http://127.0.0.1:4173 npm run test:e2e -- e2e/demo-brain.spec.ts
 
 demo-down:
 	./scripts/demo_compose.sh down --remove-orphans

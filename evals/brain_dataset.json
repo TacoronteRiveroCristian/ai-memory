@@ -161,10 +161,10 @@
           "importance": 0.9
         },
         {
-          "alias": "ui_note",
-          "content": "UI dashboard palettes are unrelated to the event sourcing model and should stay outside the focused subgraph.",
+          "alias": "observability_note",
+          "content": "Alarm threshold tuning is unrelated to the event sourcing model and should stay outside the focused subgraph.",
           "memory_type": "general",
-          "tags": "concept/ui,pattern/dashboard",
+          "tags": "concept/observability,pattern/alerts",
           "importance": 0.6
         }
       ],

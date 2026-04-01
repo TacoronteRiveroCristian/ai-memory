@@ -173,10 +173,10 @@ def test_graph_subgraph_is_bounded_and_memory_detail_is_available(brain_client, 
         agent_id="pytest",
     )["memory_id"]
     brain_client.create_memory(
-        content="A separate UI note about dashboard theming should not appear in the event sourcing search graph.",
+        content="A separate observability note about alarm thresholds should not appear in the event sourcing search graph.",
         project=project,
         memory_type="general",
-        tags="concept/ui,pattern/dashboard",
+        tags="concept/observability,pattern/alerts",
         importance=0.6,
         agent_id="pytest",
     )

@@ -7,7 +7,6 @@ ENV_FILE="${AI_MEMORY_ENV_FILE:-$PROJECT_DIR/.env}"
 TMP_DIR="${AI_MEMORY_DEMO_TMP_DIR:-$PROJECT_DIR/.tmp/demo}"
 SANITIZED_ENV_FILE="${AI_MEMORY_DEMO_ENV_FILE:-$TMP_DIR/runtime.env}"
 BASE_URL="${AI_MEMORY_BASE_URL:-http://127.0.0.1:8050}"
-UI_URL="${AI_MEMORY_UI_URL:-http://127.0.0.1:4173}"
 TEST_NOW="${AI_MEMORY_TEST_NOW_OVERRIDE:-2030-01-01T00:00:00+00:00}"
 DEMO_NAMESPACE="${DEMO_NAMESPACE:-}"
 DEMO_WITH_PLASTICITY="${DEMO_WITH_PLASTICITY:-true}"
@@ -51,30 +50,13 @@ wait_for_api_ready() {
   return 1
 }
 
-wait_for_ui_ready() {
-  local attempt
-  for attempt in $(seq 1 90); do
-    if curl -fsS "$UI_URL" >/dev/null 2>&1; then
-      echo "UI lista tras $attempt intentos."
-      return 0
-    fi
-    sleep 2
-  done
-  echo "La UI no respondió en $UI_URL." >&2
-  return 1
-}
-
-echo "==> Levantando stack completa de demo"
+echo "==> Levantando stack de demo"
 AI_MEMORY_TEST_MODE=true AI_MEMORY_TEST_NOW="$TEST_NOW" "$PROJECT_DIR/scripts/demo_compose.sh" up -d --build \
-  qdrant postgres redis mem0 api-server reflection-worker ui
+  qdrant postgres redis mem0 api-server reflection-worker
 
 echo
 echo "==> Esperando backend"
 wait_for_api_ready
-
-echo
-echo "==> Esperando frontend"
-wait_for_ui_ready
 
 echo
 echo "==> Sembrando cerebro demo"
@@ -97,7 +79,6 @@ python3 scripts/seed_demo_brain.py "${SEED_ARGS[@]}"
 echo
 echo "Demo lista."
 echo "API: $BASE_URL"
-echo "UI:  $UI_URL"
 echo "Proyecto EMS: ${DEMO_NAMESPACE:+$DEMO_NAMESPACE-}demo-ems-fotovoltaica"
 echo "Proyecto meteo: ${DEMO_NAMESPACE:+$DEMO_NAMESPACE-}demo-monitorizacion-estaciones-meteorologicas"
 echo "Proyecto SCADA: ${DEMO_NAMESPACE:+$DEMO_NAMESPACE-}demo-scada-hibrido-solar-bess"

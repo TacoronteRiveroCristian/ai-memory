@@ -12,11 +12,4 @@ __pycache__/
 .ruff_cache/
 .venv/
 htmlcov/
-/ui/node_modules/
-/ui/dist/
-/ui/*.tsbuildinfo
-/ui/vite.config.js
-/ui/vite.config.d.ts
-/ui/playwright-report/
-/ui/test-results/
 /.tmp/

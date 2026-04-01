@@ -85,7 +85,6 @@ services:
     restart: unless-stopped
     networks:
       - backend
-      - frontend
     ports:
       - "127.0.0.1:8000:8000"
     volumes:
@@ -127,7 +126,6 @@ services:
     restart: unless-stopped
     networks:
       - backend
-      - frontend
     ports:
       - "8050:8050"
     environment:
@@ -176,7 +174,6 @@ services:
     restart: unless-stopped
     networks:
       - backend
-      - frontend
     environment:
       POSTGRES_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
@@ -208,26 +205,7 @@ services:
       retries: 5
       start_period: 30s
 
-  ui:
-    build:
-      context: ./ui
-      dockerfile: Dockerfile
-    container_name: ai-memory-ui
-    restart: unless-stopped
-    networks:
-      - frontend
-    ports:
-      - "4173:4173"
-    environment:
-      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://api-server:8050}
-      MEMORY_API_KEY: ${MEMORY_API_KEY}
-    depends_on:
-      api-server:
-        condition: service_healthy
-
 networks:
-  frontend:
-    driver: bridge
   backend:
     driver: bridge
     internal: true
