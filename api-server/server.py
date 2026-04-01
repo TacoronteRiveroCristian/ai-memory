@@ -2592,6 +2592,8 @@ async def queue_manual_reflection() -> dict[str, Any]:
 @app.middleware("http")
 async def enforce_api_key(request: Request, call_next):
     path = request.url.path
+    if request.method == "OPTIONS":
+        return await call_next(request)
     if path in {"/health", "/ready"}:
         return await call_next(request)
     if path == "/stats" or path.startswith("/api/") or path.startswith("/mcp"):
