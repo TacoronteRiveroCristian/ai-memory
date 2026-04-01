@@ -205,6 +205,20 @@ services:
       retries: 5
       start_period: 30s
 
+  brain-ui:
+    build:
+      context: ./brain-ui
+      args:
+        VITE_API_URL: http://localhost:8050
+        VITE_API_KEY: ${MEMORY_API_KEY}
+    container_name: ai-memory-brain-ui
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    depends_on:
+      api-server:
+        condition: service_healthy
+
 networks:
   backend:
     driver: bridge

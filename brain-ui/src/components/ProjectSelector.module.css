@@ -1,0 +1,87 @@
+.wrapper {
+  position: relative;
+}
+
+.trigger {
+  background: #1a1a2e;
+  border: 1px solid #2a2a4a;
+  border-radius: 6px;
+  padding: 6px 14px;
+  color: #ccc;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.trigger:hover {
+  border-color: #a78bfa;
+}
+
+.label {
+  color: #888;
+}
+
+.value {
+  color: #a78bfa;
+}
+
+.arrow {
+  color: #555;
+  font-size: 10px;
+}
+
+.dropdown {
+  position: absolute;
+  top: 38px;
+  right: 0;
+  background: #12121f;
+  border: 1px solid #2a2a4a;
+  border-radius: 8px;
+  width: 260px;
+  padding: 6px 0;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  z-index: 100;
+}
+
+.item {
+  padding: 8px 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+}
+
+.item:hover {
+  background: rgba(167, 139, 250, 0.08);
+}
+
+.itemActive {
+  background: rgba(167, 139, 250, 0.1);
+  border-left: 2px solid #a78bfa;
+}
+
+.itemDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.itemName {
+  color: #ccc;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.itemMeta {
+  color: #555;
+  font-size: 10px;
+}
+
+.divider {
+  height: 1px;
+  background: #1e1e3a;
+  margin: 4px 0;
+}

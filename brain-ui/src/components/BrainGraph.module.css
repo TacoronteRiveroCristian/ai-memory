@@ -1,0 +1,43 @@
+.container {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+}
+
+.legend {
+  position: absolute;
+  bottom: 12px;
+  left: 12px;
+  background: rgba(10, 10, 18, 0.85);
+  border: 1px solid #1e1e3a;
+  border-radius: 6px;
+  padding: 8px 12px;
+  display: flex;
+  gap: 14px;
+  font-size: 10px;
+  color: #888;
+  z-index: 10;
+  pointer-events: none;
+}
+
+.legendItem {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.legendDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.legendLine {
+  width: 16px;
+  height: 0;
+  border-top: 1.5px dashed #a78bfa;
+  display: inline-block;
+  vertical-align: middle;
+  margin-right: 4px;
+}

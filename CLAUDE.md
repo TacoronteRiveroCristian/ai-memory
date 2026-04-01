@@ -59,6 +59,21 @@ make health                       # service health check
 make smoke                        # full stack e2e smoke test
 ```
 
+## Brain UI (Frontend)
+
+Located in `brain-ui/`. React + TypeScript SPA using react-force-graph-2d for "Living Brain" visualization.
+
+```bash
+# Development
+cd brain-ui && npm install && npm run dev    # Vite dev server on :5173
+
+# Docker
+docker compose build brain-ui                 # Build production image
+docker compose up -d brain-ui                 # Serve on :3000
+```
+
+Requires `VITE_API_URL` and `VITE_API_KEY` environment variables. In Docker, these are passed as build args from the root `.env` (`MEMORY_API_KEY`).
+
 ## Test Markers
 
 - Unmarked tests: run in deterministic mode (no external API calls)

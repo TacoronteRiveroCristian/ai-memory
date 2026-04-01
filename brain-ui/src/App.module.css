@@ -1,0 +1,47 @@
+.app {
+  display: flex;
+  flex-direction: column;
+  width: 100vw;
+  height: 100vh;
+  background: #0a0a12;
+}
+
+.main {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+.loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  color: #555;
+  font-size: 14px;
+}
+
+.error {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  color: #ff6b6b;
+  font-size: 14px;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.retryBtn {
+  background: #1a1a2e;
+  border: 1px solid #2a2a4a;
+  border-radius: 6px;
+  padding: 6px 16px;
+  color: #a78bfa;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.retryBtn:hover {
+  border-color: #a78bfa;
+}
