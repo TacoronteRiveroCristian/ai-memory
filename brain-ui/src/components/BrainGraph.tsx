@@ -1,4 +1,4 @@
-import { useCallback, useRef, useEffect } from "react";
+import { useCallback, useRef, useEffect, useState } from "react";
 import ForceGraph2D from "react-force-graph-2d";
 import type { GraphNode, GraphEdge } from "../types";
 import {
@@ -48,6 +48,22 @@ export default function BrainGraph({
   const graphRef = useRef<any>(undefined);
   const containerRef = useRef<HTMLDivElement>(null);
   const pulsePhase = useRef(0);
+  const [dimensions, setDimensions] = useState({ width: 800, height: 600 });
+
+  // Track container size so canvas always fills it
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+
+    const update = () => {
+      setDimensions({ width: el.clientWidth, height: el.clientHeight });
+    };
+    update();
+
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   const graphNodes: ForceNode[] = nodes.map((n) => ({
     ...n,
@@ -194,20 +210,38 @@ export default function BrainGraph({
     <div className={styles.container} ref={containerRef}>
       <ForceGraph2D
         ref={graphRef}
+        width={dimensions.width}
+        height={dimensions.height}
         graphData={{ nodes: graphNodes, links: graphLinks }}
         nodeId="id"
         linkSource="source"
         linkTarget="target"
         nodeCanvasObject={nodeCanvasObject}
         linkCanvasObject={linkCanvasObject}
-        onNodeClick={(node: any) => onNodeClick(node as ForceNode)}
+        nodePointerAreaPaint={(node: any, color: string, ctx: CanvasRenderingContext2D) => {
+          const size = getNodeSize(node as ForceNode);
+          const hitRadius = Math.max(size + 4, 8);
+          ctx.beginPath();
+          ctx.arc(node.x ?? 0, node.y ?? 0, hitRadius, 0, Math.PI * 2);
+          ctx.fillStyle = color;
+          ctx.fill();
+        }}
+        onNodeClick={(node: any) => {
+          const n = node as ForceNode;
+          // Smooth center on clicked node
+          if (graphRef.current) {
+            graphRef.current.centerAt(n.x, n.y, 600);
+          }
+          onNodeClick(n);
+        }}
         onBackgroundClick={onBackgroundClick}
         backgroundColor="#0a0a12"
         linkDirectionalParticles={0}
-        d3AlphaDecay={0.02}
-        d3VelocityDecay={0.3}
-        warmupTicks={50}
-        cooldownTicks={100}
+        enableNodeDrag={false}
+        d3AlphaDecay={0.05}
+        d3VelocityDecay={0.4}
+        warmupTicks={100}
+        cooldownTicks={0}
       />
       <div className={styles.legend}>
         <span className={styles.legendItem}>
