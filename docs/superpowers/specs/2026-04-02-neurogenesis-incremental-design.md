@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-02
 **Status:** Approved
-**Approach:** Incremental layered construction (5 capas)
+**Approach:** Incremental layered construction (6 capas)
 
 ## Problem Statement
 
@@ -23,6 +23,127 @@ The brain can search across bridges but cannot synthesize knowledge from multipl
 - **Adaptive sleep**: consolidation frequency responds to brain activity, not fixed timers
 - **Emergent schemas with home**: cross-project abstractions live in the project where the pattern is strongest, with the ability to migrate
 - **Full observability**: biological health dashboard integrated into Brain UI
+
+---
+
+## Layer 0: Tag Canonicalization and Fuzzy Matching (Foundation)
+
+### Problem
+
+The entire biology depends on tag overlap to form synapses. Currently, `compute_tag_overlap()` uses **exact string intersection** after minimal normalization (lowercase + strip special chars). This means:
+
+- `grafana` vs `tech/grafana` → **no match** (different strings)
+- `retry-pattern` vs `retry-patterns` → **no match** (plural)
+- `error-handling` vs `error-management` → **no match** (synonyms)
+- `k8s` vs `kubernetes` → **no match** (abbreviation)
+- `js` vs `javascript` → **no match** (abbreviation)
+
+This is catastrophic for synapse formation: if tags never overlap, heuristic relation classification fails, `auto_link_memory()` produces nothing, and the brain stays fragmented regardless of how good the upper layers are.
+
+### Solution: Three-tier tag matching
+
+**Tier 1 — Structural canonicalization (deterministic, at write time)**
+
+Enhance `canonicalize_tag()` to:
+
+1. Strip hierarchical prefixes: `tech/grafana` → `grafana`, `tools/docker` → `docker`
+   - Store the original hierarchical tag AND the leaf tag
+   - New field in memory_log: `tag_stems TEXT[]` (the leaf forms, auto-derived)
+2. Singularize: `retry-patterns` → `retry-pattern`, `containers` → `container`
+   - Use a simple suffix-stripping approach (not a full NLP lemmatizer)
+   - Rules: strip trailing `s` unless word ends in `ss`, `us`, `is`; strip `es` after `sh`, `ch`, `x`, `z`
+3. Normalize common abbreviations via a configurable alias map:
+   ```python
+   TAG_ALIASES = {
+       "k8s": "kubernetes",
+       "js": "javascript",
+       "ts": "typescript",
+       "py": "python",
+       "pg": "postgresql",
+       "postgres": "postgresql",
+       "gha": "github-actions",
+       "tf": "terraform",
+       "react.js": "react",
+       "node.js": "nodejs",
+       "vue.js": "vue",
+       ...
+   }
+   ```
+   - Loaded from a config file (`config/tag_aliases.json`) so users can extend it
+   - Applied during canonicalization: input tag → alias lookup → canonical form
+
+**Tier 2 — Fuzzy matching (at search/relation time)**
+
+Replace exact intersection in `compute_tag_overlap()` with a similarity-aware comparison:
+
+```python
+def compute_tag_overlap(query_tags, memory_tags) -> float:
+    if not query_tags or not memory_tags:
+        return 0.0
+    
+    query_stems = set(stem(t) for t in query_tags)
+    memory_stems = set(stem(t) for t in memory_tags)
+    
+    # Exact stem match
+    exact_overlap = query_stems & memory_stems
+    
+    # Fuzzy match for remaining (Levenshtein distance <= 2, or substring containment)
+    remaining_query = query_stems - exact_overlap
+    remaining_memory = memory_stems - exact_overlap
+    fuzzy_overlap = 0
+    for qt in remaining_query:
+        for mt in remaining_memory:
+            if is_fuzzy_match(qt, mt):  # edit_distance <= 2 OR one contains the other
+                fuzzy_overlap += 0.7   # partial credit
+                break
+    
+    total = len(exact_overlap) + fuzzy_overlap
+    return round(clamp01(total / max(1, len(query_stems))), 4)
+```
+
+**Tier 3 — Semantic tag similarity (during consolidation/REM)**
+
+During sleep cycles, build a **tag co-occurrence graph**:
+
+```sql
+CREATE TABLE tag_synonyms (
+    id SERIAL PRIMARY KEY,
+    tag_a VARCHAR(255) NOT NULL,
+    tag_b VARCHAR(255) NOT NULL,
+    similarity_score FLOAT NOT NULL,   -- 0.0-1.0
+    source VARCHAR(50) NOT NULL,       -- co_occurrence, embedding, manual
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (tag_a, tag_b)
+);
+
+CREATE INDEX idx_tag_synonyms_a ON tag_synonyms(tag_a);
+CREATE INDEX idx_tag_synonyms_b ON tag_synonyms(tag_b);
+```
+
+During REM sleep:
+1. Find tags that frequently co-occur on related memories (same_concept, extends relations)
+2. Compute embedding similarity between tag names (using the existing embedding pipeline)
+3. If similarity > 0.8 → create synonym entry
+4. `compute_tag_overlap()` consults `tag_synonyms` for non-exact matches:
+   - `error-handling` and `error-management` discovered as synonyms via embedding similarity
+   - Future tag comparisons treat them as 70% overlap
+
+### Migration strategy
+
+- **Tier 1** runs once as a migration on all existing memories (recanonicalizes tags, populates `tag_stems`)
+- **Tier 2** is a code change to `compute_tag_overlap()` — immediately effective
+- **Tier 3** builds up organically over sleep cycles — no migration needed
+- Backward compatible: existing exact matches still work, fuzzy adds net-new matches
+
+### Impact on upper layers
+
+Without Layer 0, all other layers operate on broken assumptions:
+- Layer 1 myelination: synapses never form if tags don't match → nothing to myelinate
+- Layer 2 sleep: schema extraction clusters on relations → no relations without tag overlap
+- Layer 3 activation: propagation follows relations → no relations = no propagation
+- Layer 4 schemas: cross-project patterns require tag overlap to cluster → invisible without this
+
+Layer 0 is the **sensory cortex** of the brain — if it can't perceive similarity, it can't learn.
 
 ---
 
@@ -398,7 +519,8 @@ Each layer is independently testable and deployable:
 
 | Layer | Dependencies | Estimated scope |
 |-------|-------------|-----------------|
-| 1. Myelination + Permeability | None — data model only | SQL migration + Python model updates |
+| 0. Tag Canonicalization | None — foundation | Enhance canonicalize_tag, compute_tag_overlap, migration |
+| 1. Myelination + Permeability | Layer 0 (tags must match for synapses to form) | SQL migration + Python model updates |
 | 2. Adaptive Sleep | Layer 1 (reads myelin/permeability) | Refactor reflection-worker |
 | 3. Spreading Activation | Layer 1 (reads myelin_score) | Modify propagate_activation in server.py |
 | 4. Emergent Schemas | Layers 1+2 (REM phase + permeability) | Extend schema extraction in worker.py |
