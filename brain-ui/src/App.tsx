@@ -30,49 +30,72 @@ function mergeSubgraphs(responses: SubgraphResponse[]): {
   return { nodes: Array.from(nodeMap.values()), edges };
 }
 
+function filterByKeyword(
+  nodes: GraphNode[],
+  edges: GraphEdge[],
+  keyword: string
+): { nodes: GraphNode[]; edges: GraphEdge[] } {
+  if (!keyword) return { nodes, edges };
+  const lower = keyword.toLowerCase();
+  const matchingNodes = nodes.filter(
+    (n) =>
+      n.content_preview.toLowerCase().includes(lower) ||
+      n.tags.some((t) => t.toLowerCase().includes(lower)) ||
+      n.memory_type.toLowerCase().includes(lower) ||
+      n.project.toLowerCase().includes(lower)
+  );
+  const nodeIds = new Set(matchingNodes.map((n) => n.memory_id));
+  const matchingEdges = edges.filter(
+    (e) => nodeIds.has(e.source_memory_id) && nodeIds.has(e.target_memory_id)
+  );
+  return { nodes: matchingNodes, edges: matchingEdges };
+}
+
 export default function App() {
   const [projects, setProjects] = useState<FacetProject[]>([]);
-  const [selectedProject, setSelectedProject] = useState<string | null>(null);
-  const [nodes, setNodes] = useState<GraphNode[]>([]);
-  const [edges, setEdges] = useState<GraphEdge[]>([]);
+  const [selectedProjects, setSelectedProjects] = useState<Set<string>>(new Set());
+  const [allNodes, setAllNodes] = useState<GraphNode[]>([]);
+  const [allEdges, setAllEdges] = useState<GraphEdge[]>([]);
+  const [keyword, setKeyword] = useState("");
   const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const projectsRef = useRef<FacetProject[]>([]);
 
-  const loadGraph = useCallback(async (project: string | null, projectList?: FacetProject[]) => {
-    const available = projectList || projectsRef.current;
-    setLoading(true);
-    setError(null);
-    try {
-      if (project) {
-        // Single project
-        const data = await fetchSubgraph({ project, scope: "bridged" });
-        setNodes(data.nodes);
-        setEdges(data.edges);
-      } else if (available.length > 0) {
-        // All projects: top 5 by memory count, bridged scope, then merge
-        const top = [...available]
-          .sort((a, b) => b.memory_count - a.memory_count)
-          .slice(0, 5);
+  const loadGraph = useCallback(
+    async (selected: Set<string>, projectList?: FacetProject[]) => {
+      const available = projectList || projectsRef.current;
+      setLoading(true);
+      setError(null);
+      try {
+        // Determine which projects to fetch
+        const targetProjects =
+          selected.size === 0
+            ? available.map((p) => p.project)
+            : [...selected];
+
+        if (targetProjects.length === 0) {
+          setAllNodes([]);
+          setAllEdges([]);
+          return;
+        }
+
         const results = await Promise.all(
-          top.map((p) =>
-            fetchSubgraph({ project: p.project, scope: "bridged" })
+          targetProjects.map((p) =>
+            fetchSubgraph({ project: p, scope: "bridged" })
           )
         );
         const merged = mergeSubgraphs(results);
-        setNodes(merged.nodes);
-        setEdges(merged.edges);
-      } else {
-        setNodes([]);
-        setEdges([]);
+        setAllNodes(merged.nodes);
+        setAllEdges(merged.edges);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Failed to load graph");
+      } finally {
+        setLoading(false);
       }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load graph");
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+    },
+    []
+  );
 
   useEffect(() => {
     (async () => {
@@ -80,7 +103,7 @@ export default function App() {
         const data = await fetchFacets();
         setProjects(data.projects);
         projectsRef.current = data.projects;
-        await loadGraph(null, data.projects);
+        await loadGraph(new Set(), data.projects);
       } catch {
         setError("Failed to connect to API");
         setLoading(false);
@@ -88,11 +111,18 @@ export default function App() {
     })();
   }, [loadGraph]);
 
-  const handleProjectChange = (project: string | null) => {
-    setSelectedProject(project);
+  const handleProjectChange = (next: Set<string>) => {
+    setSelectedProjects(next);
     setSelectedNode(null);
-    loadGraph(project);
+    loadGraph(next);
   };
+
+  const handleKeywordChange = (kw: string) => {
+    setKeyword(kw);
+  };
+
+  // Apply client-side keyword filter on top of loaded data
+  const { nodes, edges } = filterByKeyword(allNodes, allEdges, keyword);
 
   const projectList = projects.map((p) => p.project);
 
@@ -100,8 +130,10 @@ export default function App() {
     <div className={styles.app}>
       <TopBar
         projects={projects}
-        selectedProject={selectedProject}
+        selectedProjects={selectedProjects}
         onProjectChange={handleProjectChange}
+        keyword={keyword}
+        onKeywordChange={handleKeywordChange}
       />
       <div className={styles.main}>
         {loading ? (
@@ -111,7 +143,7 @@ export default function App() {
             <span>{error}</span>
             <button
               className={styles.retryBtn}
-              onClick={() => loadGraph(selectedProject)}
+              onClick={() => loadGraph(selectedProjects)}
             >
               Retry
             </button>
@@ -121,7 +153,7 @@ export default function App() {
             nodes={nodes}
             edges={edges}
             projectList={projectList}
-            selectedProject={selectedProject}
+            selectedProject={selectedProjects.size === 1 ? [...selectedProjects][0] : null}
             onNodeClick={setSelectedNode}
             onBackgroundClick={() => setSelectedNode(null)}
           />
