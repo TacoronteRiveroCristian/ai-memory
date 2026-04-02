@@ -27,10 +27,33 @@ from qdrant_client.models import (
     Distance,
     FieldCondition,
     Filter,
+    Fusion,
+    FusionQuery,
     MatchValue,
     PayloadSchemaType,
     PointStruct,
+    Prefetch,
     VectorParams,
+)
+from sensory_cortex import (
+    extract_keyphrases,
+    canonicalize_tags as sc_canonicalize_tags,
+    classify_synapse_cascade,
+    compute_combined_score,
+    emotional_proximity as sc_emotional_proximity,
+    importance_attraction as sc_importance_attraction,
+    temporal_proximity as sc_temporal_proximity,
+    type_compatibility as sc_type_compatibility,
+)
+from myelination import (
+    get_permeable_projects,
+    increment_permeability,
+    update_myelin_score,
+    ensure_permeability,
+    MYELIN_DELTA_DIRECT_ACCESS,
+    MYELIN_DELTA_CO_ACTIVATION,
+    PERMEABILITY_CO_ACTIVATION,
+    PERMEABILITY_THRESHOLD,
 )
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -572,6 +595,16 @@ async def resolve_scope_projects(project_name: Optional[str], scope: str) -> lis
         return [project_name]
     if normalized_scope == "global":
         return []
+    # [L1] Use permeability-based resolution, falling back to bridges
+    if pg_pool:
+        try:
+            async with pg_pool.acquire() as conn:
+                permeable = await get_permeable_projects(conn, project_name)
+                if permeable:
+                    return [project_name, *[name for name in permeable if name != project_name]]
+        except Exception:
+            pass
+    # Fallback to old bridges
     related = await get_project_bridge_names(project_name)
     return [project_name, *[name for name in related if name != project_name]]
 
@@ -682,6 +715,77 @@ async def run_schema_migrations():
         )
         """,
         "CREATE INDEX IF NOT EXISTS idx_deep_sleep_runs_status ON deep_sleep_runs(status, started_at DESC)",
+        # [L0] Keyphrases column
+        "ALTER TABLE memory_log ADD COLUMN IF NOT EXISTS keyphrases TEXT[] DEFAULT '{}'",
+        # [L1] Myelination columns on memory_relations
+        "ALTER TABLE memory_relations ADD COLUMN IF NOT EXISTS myelin_score FLOAT DEFAULT 0.0",
+        "ALTER TABLE memory_relations ADD COLUMN IF NOT EXISTS myelin_last_updated TIMESTAMPTZ DEFAULT NOW()",
+        # [L0] Synapse candidates table
+        """
+        CREATE TABLE IF NOT EXISTS synapse_candidates (
+            id SERIAL PRIMARY KEY,
+            source_memory_id UUID NOT NULL REFERENCES memory_log(id) ON DELETE CASCADE,
+            target_memory_id UUID NOT NULL REFERENCES memory_log(id) ON DELETE CASCADE,
+            semantic_score FLOAT NOT NULL,
+            domain_score FLOAT NOT NULL,
+            lexical_overlap FLOAT NOT NULL,
+            emotional_proximity FLOAT NOT NULL,
+            importance_attraction FLOAT NOT NULL,
+            temporal_proximity FLOAT NOT NULL,
+            type_compatibility FLOAT NOT NULL,
+            combined_score FLOAT NOT NULL,
+            suggested_type VARCHAR(50),
+            status VARCHAR(20) DEFAULT 'pending',
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            reviewed_at TIMESTAMPTZ,
+            CONSTRAINT synapse_candidates_unique UNIQUE (source_memory_id, target_memory_id)
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_synapse_candidates_status ON synapse_candidates(status)",
+        "CREATE INDEX IF NOT EXISTS idx_synapse_candidates_score ON synapse_candidates(combined_score DESC)",
+        # [L1] Project permeability
+        """
+        CREATE TABLE IF NOT EXISTS project_permeability (
+            id SERIAL PRIMARY KEY,
+            project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            related_project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            permeability_score FLOAT DEFAULT 0.0,
+            organic_origin BOOLEAN DEFAULT TRUE,
+            formation_reason TEXT,
+            last_activity TIMESTAMPTZ DEFAULT NOW(),
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            CONSTRAINT project_permeability_unique UNIQUE (project_id, related_project_id)
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_project_permeability_score ON project_permeability(permeability_score DESC)",
+        # [L1] Myelination events
+        """
+        CREATE TABLE IF NOT EXISTS myelination_events (
+            id SERIAL PRIMARY KEY,
+            relation_id UUID REFERENCES memory_relations(id) ON DELETE CASCADE,
+            permeability_id INTEGER REFERENCES project_permeability(id) ON DELETE CASCADE,
+            event_type VARCHAR(50) NOT NULL,
+            delta FLOAT NOT NULL,
+            new_score FLOAT NOT NULL,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_myelination_events_relation ON myelination_events(relation_id)",
+        "CREATE INDEX IF NOT EXISTS idx_myelination_events_created ON myelination_events(created_at)",
+        # [L2] Sleep cycles
+        """
+        CREATE TABLE IF NOT EXISTS sleep_cycles (
+            id SERIAL PRIMARY KEY,
+            cycle_type VARCHAR(10) NOT NULL,
+            started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            completed_at TIMESTAMPTZ,
+            trigger_reason TEXT,
+            projects_processed TEXT[],
+            stats JSONB DEFAULT '{}'::jsonb
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_sleep_cycles_type ON sleep_cycles(cycle_type)",
+        "CREATE INDEX IF NOT EXISTS idx_sleep_cycles_started ON sleep_cycles(started_at DESC)",
         "DROP TRIGGER IF EXISTS update_memory_relations_updated_at ON memory_relations",
         """
         CREATE TRIGGER update_memory_relations_updated_at BEFORE UPDATE ON memory_relations
@@ -753,14 +857,26 @@ async def find_similar_memory(
     conditions = [FieldCondition(key="project_id", match=MatchValue(value=project))]
     if memory_type:
         conditions.append(FieldCondition(key="memory_type", match=MatchValue(value=memory_type)))
-    response = await qdrant.query_points(
-        collection_name=COLLECTION_NAME,
-        query=embedding,
-        query_filter=Filter(must=conditions),
-        limit=1,
-        with_payload=True,
-        score_threshold=threshold,
-    )
+    try:
+        response = await qdrant.query_points(
+            collection_name=COLLECTION_NAME,
+            query=embedding,
+            using="content",
+            query_filter=Filter(must=conditions),
+            limit=1,
+            with_payload=True,
+            score_threshold=threshold,
+        )
+    except Exception:
+        # Fallback for old single-vector collections
+        response = await qdrant.query_points(
+            collection_name=COLLECTION_NAME,
+            query=embedding,
+            query_filter=Filter(must=conditions),
+            limit=1,
+            with_payload=True,
+            score_threshold=threshold,
+        )
     results = response.points
     if not results:
         return None
@@ -793,7 +909,8 @@ async def fetch_memory_records(memory_ids: list[str]) -> dict[str, dict[str, Any
                 COALESCE(ml.valence, 0.0) AS valence,
                 COALESCE(ml.arousal, 0.5) AS arousal,
                 COALESCE(ml.novelty_score, 0.5) AS novelty_score,
-                COALESCE(ml.abstraction_level, 0) AS abstraction_level
+                COALESCE(ml.abstraction_level, 0) AS abstraction_level,
+                COALESCE(ml.keyphrases, '{}') AS keyphrases
             FROM memory_log ml
             LEFT JOIN projects p ON p.id = ml.project_id
             WHERE ml.id = ANY($1::uuid[])
@@ -823,6 +940,7 @@ async def fetch_memory_records(memory_ids: list[str]) -> dict[str, dict[str, Any
             "arousal": float(row["arousal"] or 0.5),
             "novelty_score": float(row["novelty_score"] or 0.5),
             "abstraction_level": int(row["abstraction_level"] or 0),
+            "keyphrases": list(row["keyphrases"] or []),
         }
     return records
 
@@ -1111,36 +1229,65 @@ async def decay_memory_stability(project_name: str) -> int:
 
 
 async def propagate_activation(memory_id: str, depth: int = 2, decay_factor: float = ACTIVATION_PROPAGATION_DECAY) -> int:
-    """[4] Spreading activation: propaga energía de activación hacia memorias vecinas vía relaciones.
-    La energía se almacena en Redis con TTL de 15 min para usarse como priming en búsquedas."""
+    """[4][L3] Spreading activation with myelinic resistance for cross-project relations.
+    La energía se almacena en Redis con TTL de 15 min para usarse como priming en búsquedas.
+    Cross-project relations modulate decay by myelin_score."""
     if not pg_pool or not redis_client:
         return 0
     frontier: list[tuple[str, float]] = [(memory_id, 1.0)]
     visited: dict[str, float] = {memory_id: 1.0}
     propagated_count = 0
     async with pg_pool.acquire() as conn:
-        for _ in range(depth):
+        # Get source memory's project
+        source_row = await conn.fetchrow(
+            "SELECT p.name as project FROM memory_log m JOIN projects p ON p.id = m.project_id WHERE m.id = $1",
+            uuid.UUID(memory_id),
+        )
+        source_project = str(source_row["project"]) if source_row else ""
+
+        for hop in range(depth):
             if not frontier:
                 break
             frontier_ids = [uuid.UUID(mid) for mid, _ in frontier]
             energy_map = {mid: energy for mid, energy in frontier}
             rows = await conn.fetch(
                 """
-                SELECT source_memory_id::text AS src, target_memory_id::text AS tgt, weight
-                FROM memory_relations
-                WHERE active = TRUE
-                  AND (source_memory_id = ANY($1::uuid[]) OR target_memory_id = ANY($1::uuid[]))
+                SELECT mr.source_memory_id::text AS src, mr.target_memory_id::text AS tgt,
+                       mr.weight, COALESCE(mr.myelin_score, 0.0) AS myelin_score,
+                       ps.name AS src_project, pt.name AS tgt_project
+                FROM memory_relations mr
+                JOIN memory_log ms ON ms.id = mr.source_memory_id
+                JOIN memory_log mt ON mt.id = mr.target_memory_id
+                LEFT JOIN projects ps ON ps.id = ms.project_id
+                LEFT JOIN projects pt ON pt.id = mt.project_id
+                WHERE mr.active = TRUE
+                  AND (mr.source_memory_id = ANY($1::uuid[]) OR mr.target_memory_id = ANY($1::uuid[]))
                 """,
                 frontier_ids,
             )
             next_frontier: list[tuple[str, float]] = []
             for row in rows:
-                src, tgt, weight = str(row["src"]), str(row["tgt"]), float(row["weight"])
+                src, tgt = str(row["src"]), str(row["tgt"])
+                weight = float(row["weight"])
+                myelin = float(row["myelin_score"])
+                src_proj = str(row["src_project"] or "")
+                tgt_proj = str(row["tgt_project"] or "")
+
                 if src in energy_map:
                     neighbor, source_energy = tgt, energy_map[src]
+                    neighbor_project = tgt_proj
                 else:
                     neighbor, source_energy = src, energy_map.get(tgt, 0.0)
-                propagated_energy = source_energy * decay_factor * weight
+                    neighbor_project = src_proj
+
+                is_cross = source_project and neighbor_project and neighbor_project != source_project
+                if is_cross:
+                    # [L3] Myelinic resistance: myelin modulates cross-project decay
+                    effective_decay = decay_factor * myelin
+                else:
+                    effective_decay = decay_factor
+
+                propagated_energy = source_energy * effective_decay * weight
                 if propagated_energy < 0.05:
                     continue
                 if propagated_energy > visited.get(neighbor, 0.0):
@@ -1307,14 +1454,29 @@ async def structured_search_memories(
     raw_limit = max(limit * 6, 24)
     if project_conditions:
         raw_limit = max(raw_limit, limit * max(6, len(project_conditions) * 3))
-    response = await qdrant.query_points(
-        collection_name=COLLECTION_NAME,
-        query=query_embedding,
-        query_filter=query_filter,
-        limit=raw_limit,
-        with_payload=True,
-        score_threshold=score_threshold,
-    )
+    # [L0] Fusion search: dual-vector with RRF, fallback to single-vector
+    try:
+        response = await qdrant.query_points(
+            collection_name=COLLECTION_NAME,
+            prefetch=[
+                Prefetch(query=query_embedding, using="content", limit=raw_limit),
+                Prefetch(query=query_embedding, using="domain", limit=raw_limit),
+            ],
+            query=FusionQuery(fusion=Fusion.RRF),
+            query_filter=query_filter,
+            limit=raw_limit,
+            with_payload=True,
+        )
+    except Exception as fusion_exc:
+        logger.debug("Fusion search failed, falling back to single-vector: %s", fusion_exc)
+        response = await qdrant.query_points(
+            collection_name=COLLECTION_NAME,
+            query=query_embedding,
+            query_filter=query_filter,
+            limit=raw_limit,
+            with_payload=True,
+            score_threshold=score_threshold,
+        )
     points = response.points
     metadata = await fetch_memory_records([str(point.id) for point in points])
     relation_weights = await fetch_incident_relation_weights([str(point.id) for point in points])
@@ -1382,6 +1544,9 @@ async def structured_search_memories(
                 "recency_frequency": recency_frequency,
                 "tag_overlap": tag_overlap,
                 "importance": float(payload.get("importance") or meta.get("importance") or 0.5),
+                "valence": float(payload.get("valence") or meta.get("valence") or 0.0),
+                "arousal": float(payload.get("arousal") or meta.get("arousal") or 0.5),
+                "created_at": payload.get("created_at") or meta.get("created_at"),
                 "stability_score": float(meta.get("stability_score", 0.5) or 0.5),
                 "manual_pin": bool(meta.get("manual_pin", False)),
             }
@@ -1523,37 +1688,91 @@ async def infer_relations_from_candidates(
     origin: str,
     max_links: Optional[int] = None,
 ) -> list[dict[str, Any]]:
+    """[L0] Multi-signal cascade replaces tag-gated synapse formation."""
     created: list[dict[str, Any]] = []
-    normalized_tags = normalize_tags(source_memory.get("tags", []))
+    source_text = str(source_memory.get("content", "")).lower()
     for candidate in candidates:
         try:
             if candidate["project"] not in allowed_projects:
                 continue
-            candidate_tags = normalize_tags(candidate.get("tags", []))
-            shared_tags = sorted(set(normalized_tags) & set(candidate_tags))
-            if candidate["semantic_score"] < 0.88 and not shared_tags:
+            candidate_text = str(candidate.get("content", "")).lower()
+            cross_project = source_memory.get("project") != candidate.get("project")
+
+            # Compute all 7 signals
+            signals = {
+                "semantic_score": float(candidate.get("semantic_score", 0.0)),
+                "domain_score": float(candidate.get("domain_score", candidate.get("semantic_score", 0.0))),
+                "lexical_overlap": compute_text_overlap(source_text, candidate_text),
+                "emotional_proximity": sc_emotional_proximity(source_memory, candidate),
+                "importance_attraction": sc_importance_attraction(source_memory, candidate),
+                "temporal_proximity": sc_temporal_proximity(source_memory, candidate),
+                "type_compatibility": sc_type_compatibility(source_memory, candidate),
+            }
+
+            result = classify_synapse_cascade(signals, cross_project)
+            if result is None:
                 continue
-            relation = classify_relation_heuristic(source_memory, candidate, candidate["semantic_score"], shared_tags)
-            if relation is None and candidate["semantic_score"] >= 0.86:
-                relation = await classify_relation_with_llm(source_memory, candidate, candidate["semantic_score"], shared_tags)
-            if relation is None:
-                continue
-            created.append(
-                await upsert_memory_relation(
-                    source_memory_id=source_memory["id"],
-                    target_memory_id=candidate["id"],
-                    relation_type=relation["relation_type"],
-                    weight=float(relation["weight"]),
-                    origin=origin,
-                    evidence={
-                        "reason": relation.get("reason", ""),
-                        "semantic_score": candidate["semantic_score"],
-                        "shared_tags": shared_tags,
-                        "source_project": source_memory.get("project"),
-                        "target_project": candidate["project"],
-                    },
-                )
+
+            # Tier 3: store as candidate for sleep validation
+            if result["tier"] == 3 and pg_pool:
+                try:
+                    async with pg_pool.acquire() as conn:
+                        await conn.execute(
+                            """
+                            INSERT INTO synapse_candidates
+                            (source_memory_id, target_memory_id, semantic_score, domain_score,
+                             lexical_overlap, emotional_proximity, importance_attraction,
+                             temporal_proximity, type_compatibility, combined_score, suggested_type)
+                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                            ON CONFLICT (source_memory_id, target_memory_id) DO UPDATE
+                                SET combined_score = EXCLUDED.combined_score,
+                                    status = 'pending'
+                            """,
+                            uuid.UUID(source_memory["id"]),
+                            uuid.UUID(candidate["id"]),
+                            signals["semantic_score"],
+                            signals["domain_score"],
+                            signals["lexical_overlap"],
+                            signals["emotional_proximity"],
+                            signals["importance_attraction"],
+                            signals["temporal_proximity"],
+                            signals["type_compatibility"],
+                            result["combined_score"],
+                            result["relation_type"],
+                        )
+                except Exception as exc:
+                    logger.debug("Failed to store synapse candidate: %s", exc)
+                continue  # Don't create relation yet - sleep validates
+
+            # Tier 1 & 2: create relation immediately
+            relation_data = await upsert_memory_relation(
+                source_memory_id=source_memory["id"],
+                target_memory_id=candidate["id"],
+                relation_type=result["relation_type"],
+                weight=float(result["weight"]),
+                origin=origin,
+                evidence={
+                    "reason": result["reason"],
+                    "tier": result["tier"],
+                    "signals": signals,
+                    "source_project": source_memory.get("project"),
+                    "target_project": candidate["project"],
+                },
             )
+            created.append(relation_data)
+
+            # Cross-project: increment permeability
+            if cross_project and pg_pool:
+                try:
+                    async with pg_pool.acquire() as conn:
+                        await increment_permeability(
+                            conn,
+                            source_memory.get("project", ""),
+                            candidate["project"],
+                        )
+                except Exception as exc:
+                    logger.debug("Failed to increment permeability: %s", exc)
+
             if max_links is not None and len(created) >= max_links:
                 break
         except Exception as exc:
@@ -1574,12 +1793,25 @@ async def auto_link_memory(
     normalized_tags = normalize_tags(tags)
     allowed_projects = set(await resolve_scope_projects(project, "bridged"))
     auto_link_score_threshold = 0.35 if AI_MEMORY_TEST_MODE else AUTO_LINK_SCORE_THRESHOLD
+    # Fetch full metadata for cascade signal computation
+    source_meta: dict[str, Any] = {}
+    async with pg_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT valence, arousal, importance, created_at FROM memory_log WHERE id = $1",
+            uuid.UUID(memory_id),
+        )
+        if row:
+            source_meta = dict(row)
     source_memory = {
         "id": memory_id,
         "project": project,
         "memory_type": memory_type,
         "content": content,
         "tags": normalized_tags,
+        "valence": source_meta.get("valence", 0.0),
+        "arousal": source_meta.get("arousal", 0.5),
+        "importance": source_meta.get("importance", 0.7),
+        "created_at": source_meta.get("created_at"),
     }
     candidates = await structured_search_memories(
         query=content,
@@ -1628,6 +1860,26 @@ async def bridge_projects_internal(
         )
     payload = serialize_row(row) or {}
     payload.update({"project": left_name, "related_project": right_name})
+    # [L1] Also create/update permeability entry for manual bridges
+    if active:
+        try:
+            async with pg_pool.acquire() as conn:
+                from myelination import PERMEABILITY_MANUAL_BRIDGE
+                perm_id = await ensure_permeability(
+                    conn, left_name, right_name, organic=False, reason=reason.strip()
+                )
+                await conn.execute(
+                    """
+                    UPDATE project_permeability
+                    SET permeability_score = GREATEST(permeability_score, $2),
+                        last_activity = NOW()
+                    WHERE id = $1
+                    """,
+                    perm_id,
+                    PERMEABILITY_MANUAL_BRIDGE,
+                )
+        except Exception as exc:
+            logger.debug("Failed to create permeability for bridge: %s", exc)
     return payload
 
 
@@ -1795,6 +2047,8 @@ async def get_memory_detail_payload(memory_id: str) -> Optional[dict[str, Any]]:
             "novelty_score": round(float(serialized.get("novelty_score", 0.5) or 0.5), 3),
             # [6] Abstracción
             "abstraction_level": int(serialized.get("abstraction_level", 0) or 0),
+            # [L0] Keyphrases
+            "keyphrases": serialized.get("keyphrases", []) or [],
         },
         "relation_count": len(relations),
         "relations": relations[:20],
@@ -2616,14 +2870,50 @@ async def init_qdrant():
     if COLLECTION_NAME not in names:
         await qdrant.create_collection(
             collection_name=COLLECTION_NAME,
-            vectors_config=VectorParams(
-                size=VECTOR_DIM,
-                distance=Distance.COSINE,
-                on_disk=True,
-            ),
+            vectors_config={
+                "content": VectorParams(
+                    size=VECTOR_DIM,
+                    distance=Distance.COSINE,
+                    on_disk=True,
+                ),
+                "domain": VectorParams(
+                    size=VECTOR_DIM,
+                    distance=Distance.COSINE,
+                    on_disk=True,
+                ),
+            },
         )
-        logger.info("Coleccion '%s' creada en Qdrant", COLLECTION_NAME)
-    for field in ["project_id", "agent_id", "memory_type", "tags"]:
+        logger.info("Coleccion '%s' creada en Qdrant (dual-vector)", COLLECTION_NAME)
+    else:
+        # Check if old single-vector format needs migration to dual-vector
+        try:
+            collection_info = await qdrant.get_collection(COLLECTION_NAME)
+            vectors_config = collection_info.config.params.vectors
+            if not isinstance(vectors_config, dict):
+                logger.warning(
+                    "Detected single-vector collection '%s'. Recreating with dual-vector config.",
+                    COLLECTION_NAME,
+                )
+                await qdrant.delete_collection(COLLECTION_NAME)
+                await qdrant.create_collection(
+                    collection_name=COLLECTION_NAME,
+                    vectors_config={
+                        "content": VectorParams(
+                            size=VECTOR_DIM,
+                            distance=Distance.COSINE,
+                            on_disk=True,
+                        ),
+                        "domain": VectorParams(
+                            size=VECTOR_DIM,
+                            distance=Distance.COSINE,
+                            on_disk=True,
+                        ),
+                    },
+                )
+                logger.info("Collection '%s' recreated with dual-vector config", COLLECTION_NAME)
+        except Exception:
+            pass
+    for field in ["project_id", "agent_id", "memory_type", "tags", "keyphrases"]:
         try:
             await qdrant.create_payload_index(
                 collection_name=COLLECTION_NAME,
@@ -2727,6 +3017,10 @@ async def store_memory(
                 )
 
         embedding = await get_embedding(content)
+        # [L0] Extract keyphrases and compute domain embedding
+        keyphrases = extract_keyphrases(content, tags_list)
+        domain_text = " ".join(keyphrases) if keyphrases else content
+        domain_embedding = await get_embedding(domain_text)
         memory_id = str(uuid.uuid4())
         # [2] Valencia emocional: inferir carga afectiva del contenido
         valence, arousal = infer_valence_arousal(content)
@@ -2754,6 +3048,7 @@ async def store_memory(
             "agent_id": agent_id,
             "memory_type": memory_type,
             "tags": tags_list,
+            "keyphrases": keyphrases,
             "importance": importance,
             "created_at": now_iso(),
             "access_count": 0,
@@ -2763,7 +3058,11 @@ async def store_memory(
         }
         await qdrant.upsert(
             collection_name=COLLECTION_NAME,
-            points=[PointStruct(id=memory_id, vector=embedding, payload=payload)],
+            points=[PointStruct(
+                id=memory_id,
+                vector={"content": embedding, "domain": domain_embedding},
+                payload=payload,
+            )],
         )
         if pg_pool:
             async with pg_pool.acquire() as conn:
@@ -2774,14 +3073,14 @@ async def store_memory(
                         id, project_id, agent_id, action_type, summary, details, importance, tags,
                         access_count, activation_score, stability_score, manual_pin,
                         valence, arousal, novelty_score, review_count, stability_halflife_days,
-                        created_at
+                        keyphrases, created_at
                     )
                     VALUES (
                         $1,
                         (SELECT id FROM projects WHERE name = $2 LIMIT 1),
                         $3, $4, $5, $6::jsonb, $7, $8, 0, 0, $9, FALSE,
                         $10, $11, $12, 0, 1.0,
-                        $13::timestamptz
+                        $13, $14::timestamptz
                     )
                     ON CONFLICT DO NOTHING
                     """,
@@ -2797,7 +3096,8 @@ async def store_memory(
                     valence,
                     arousal,
                     novelty_score,
-                    now_utc(),  # Usar reloj del servidor (respeta test clock en modo test)
+                    keyphrases,
+                    now_utc(),
                 )
         try:
             await auto_link_memory(
@@ -3410,6 +3710,16 @@ async def health():
     return {"status": "ok", "timestamp": now_iso(), "test_mode": AI_MEMORY_TEST_MODE}
 
 
+@app.get("/brain/health")
+async def brain_health_endpoint():
+    """[L5] Full biological health metrics for the brain."""
+    if not pg_pool:
+        raise HTTPException(status_code=503, detail="Database not available")
+    from brain_health import compute_brain_health
+    async with pg_pool.acquire() as conn:
+        return await compute_brain_health(conn)
+
+
 @app.get("/ready")
 async def ready():
     status = await ready_status()
@@ -3490,6 +3800,10 @@ async def api_search_memory_structured(payload: StructuredSearchRequest):
                     "tags": item["tags"],
                     "content": item["content"],
                     "manual_pin": item["manual_pin"],
+                    "importance": item.get("importance", 0.5),
+                    "valence": item.get("valence", 0.0),
+                    "arousal": item.get("arousal", 0.5),
+                    "created_at": item.get("created_at"),
                 }
                 for item in results
             ],

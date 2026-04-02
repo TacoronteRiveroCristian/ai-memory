@@ -95,6 +95,9 @@ class BrainClient:
     def reflection_status(self):
         return self.get("/api/reflections/status")
 
+    def brain_health(self):
+        return self.get("/brain/health")
+
     def set_test_clock(self, when: Optional[str]):
         return self.post("/api/test/clock", {"now": when})
 

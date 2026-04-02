@@ -990,8 +990,126 @@ async def reinforce_hot_clusters(conn: asyncpg.Connection) -> int:
     return int(result.split()[-1]) if result else 0
 
 
+async def validate_synapse_candidates(conn, project_name: str) -> dict[str, int]:
+    """[L2] NREM phase: validate Tier 3 synapse candidates."""
+    stats = {"promoted": 0, "rejected": 0}
+    rows = await conn.fetch(
+        """
+        SELECT sc.*, ms.stability_score AS src_stability, mt.stability_score AS tgt_stability
+        FROM synapse_candidates sc
+        JOIN memory_log ms ON ms.id = sc.source_memory_id
+        JOIN memory_log mt ON mt.id = sc.target_memory_id
+        JOIN projects p ON p.id = ms.project_id
+        WHERE sc.status = 'pending' AND p.name = $1
+        ORDER BY sc.combined_score DESC
+        LIMIT 50
+        """,
+        project_name,
+    )
+    for row in rows:
+        src_stable = float(row["src_stability"] or 0) > 0.1
+        tgt_stable = float(row["tgt_stability"] or 0) > 0.1
+        existing = await conn.fetchval(
+            """
+            SELECT 1 FROM memory_relations
+            WHERE ((source_memory_id = $1 AND target_memory_id = $2)
+                OR (source_memory_id = $2 AND target_memory_id = $1))
+              AND active = TRUE
+            """,
+            row["source_memory_id"],
+            row["target_memory_id"],
+        )
+        if not src_stable or not tgt_stable or existing:
+            await conn.execute(
+                "UPDATE synapse_candidates SET status = 'rejected', reviewed_at = NOW() WHERE id = $1",
+                row["id"],
+            )
+            stats["rejected"] += 1
+        else:
+            await conn.execute(
+                """
+                INSERT INTO memory_relations (source_memory_id, target_memory_id, relation_type, weight, origin, evidence_json)
+                VALUES ($1, $2, $3, $4, 'sleep_validation',
+                        jsonb_build_object('tier', 3, 'combined_score', $5::float))
+                ON CONFLICT (source_memory_id, target_memory_id, relation_type) DO NOTHING
+                """,
+                row["source_memory_id"],
+                row["target_memory_id"],
+                row["suggested_type"] or "supports",
+                float(row["combined_score"]) * 0.85,
+                float(row["combined_score"]),
+            )
+            await conn.execute(
+                "UPDATE synapse_candidates SET status = 'promoted', reviewed_at = NOW() WHERE id = $1",
+                row["id"],
+            )
+            stats["promoted"] += 1
+    return stats
+
+
+async def apply_myelin_decay(conn) -> int:
+    """[L2] REM phase: decay unused cross-project myelin."""
+    result = await conn.execute(
+        """
+        UPDATE memory_relations
+        SET myelin_score = GREATEST(0.0, myelin_score - 0.01),
+            myelin_last_updated = NOW()
+        WHERE myelin_score > 0
+          AND last_activated_at < NOW() - INTERVAL '48 hours'
+        """
+    )
+    count = int(result.split()[-1]) if result else 0
+    await conn.execute(
+        """
+        UPDATE memory_relations SET active = FALSE
+        WHERE myelin_score <= 0 AND myelin_last_updated < NOW() - INTERVAL '7 days'
+          AND myelin_score IS NOT NULL
+        """
+    )
+    return count
+
+
+async def apply_permeability_decay(conn) -> int:
+    """[L2] REM phase: decay unused project permeability."""
+    result = await conn.execute(
+        """
+        UPDATE project_permeability
+        SET permeability_score = GREATEST(0.0, permeability_score - 0.005)
+        WHERE last_activity < NOW() - INTERVAL '48 hours'
+        """
+    )
+    return int(result.split()[-1]) if result else 0
+
+
+async def record_sleep_cycle(conn, cycle_type: str, trigger_reason: str, projects: list[str], stats: dict) -> int:
+    """Record a sleep cycle start."""
+    row = await conn.fetchrow(
+        """
+        INSERT INTO sleep_cycles (cycle_type, trigger_reason, projects_processed, stats)
+        VALUES ($1, $2, $3, $4::jsonb)
+        RETURNING id
+        """,
+        cycle_type,
+        trigger_reason,
+        projects,
+        json.dumps(stats),
+    )
+    return row["id"]
+
+
+async def complete_sleep_cycle(conn, cycle_id: int, stats: dict):
+    """Mark a sleep cycle as complete."""
+    await conn.execute(
+        """
+        UPDATE sleep_cycles SET completed_at = NOW(), stats = $2::jsonb WHERE id = $1
+        """,
+        cycle_id,
+        json.dumps(stats),
+    )
+
+
 async def handle_deep_sleep():
-    """[8] Deep Sleep Phase: consolidación profunda cada 24h.
+    """[8][L2] Deep Sleep Phase: consolidación profunda con NREM candidate validation y REM decay.
     Extrae esquemas, resuelve contradicciones, poda memorias frías y refuerza clusters."""
     if not pg_pool:
         return
@@ -1015,7 +1133,19 @@ async def handle_deep_sleep():
             memories_pruned = 0
             relations_reinforced = 0
             memories_scanned_val = 0
+            candidates_promoted = 0
+            candidates_rejected = 0
+            myelin_decayed = 0
+            permeability_decayed = 0
             error_text = None
+
+            # Get all projects with activity
+            project_names = [
+                str(r["name"]) for r in await conn.fetch(
+                    "SELECT DISTINCT p.name FROM projects p JOIN memory_log m ON m.project_id = p.id"
+                )
+            ]
+
             try:
                 await update_heartbeat()
                 schemas_created = await run_schema_extraction(conn, run_id)
@@ -1025,10 +1155,44 @@ async def handle_deep_sleep():
                 memories_pruned = await prune_cold_memories(conn)
                 await update_heartbeat()
                 relations_reinforced = await reinforce_hot_clusters(conn)
+
+                # [L2] NREM: Validate synapse candidates per project
+                for pname in project_names:
+                    try:
+                        cstats = await validate_synapse_candidates(conn, pname)
+                        candidates_promoted += cstats["promoted"]
+                        candidates_rejected += cstats["rejected"]
+                    except Exception as exc:
+                        logger.warning("[L2] NREM candidate validation failed for %s: %s", pname, exc)
+                await update_heartbeat()
+
+                # [L2] REM: Myelin and permeability decay
+                myelin_decayed = await apply_myelin_decay(conn)
+                permeability_decayed = await apply_permeability_decay(conn)
+                await update_heartbeat()
+
                 memories_scanned_val = await conn.fetchval("SELECT COUNT(*) FROM memory_log") or 0
             except Exception as exc:
                 logger.exception("[8] Deep Sleep fallo parcialmente")
                 error_text = str(exc)[:2000]
+
+            # Record to sleep_cycles
+            sleep_stats = {
+                "schemas_created": schemas_created,
+                "contradictions_resolved": contradictions_resolved,
+                "memories_pruned": memories_pruned,
+                "relations_reinforced": relations_reinforced,
+                "candidates_promoted": candidates_promoted,
+                "candidates_rejected": candidates_rejected,
+                "myelin_decayed": myelin_decayed,
+                "permeability_decayed": permeability_decayed,
+            }
+            try:
+                cycle_id = await record_sleep_cycle(conn, "nrem", "deep_sleep_interval", project_names, {})
+                await complete_sleep_cycle(conn, cycle_id, sleep_stats)
+            except Exception:
+                logger.debug("Failed to record sleep cycle")
+
             await conn.execute(
                 """
                 UPDATE deep_sleep_runs
@@ -1052,8 +1216,10 @@ async def handle_deep_sleep():
                 error_text,
             )
             logger.info(
-                "[8] Deep Sleep completado: schemas=%d contradictions=%d pruned=%d reinforced=%d",
+                "[8][L2] Deep Sleep completado: schemas=%d contradictions=%d pruned=%d reinforced=%d "
+                "candidates_promoted=%d candidates_rejected=%d myelin_decayed=%d permeability_decayed=%d",
                 schemas_created, contradictions_resolved, memories_pruned, relations_reinforced,
+                candidates_promoted, candidates_rejected, myelin_decayed, permeability_decayed,
             )
         finally:
             await conn.execute("SELECT pg_advisory_unlock($1)", ADVISORY_LOCK_KEY + 1)

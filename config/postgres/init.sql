@@ -86,6 +86,8 @@ CREATE TABLE IF NOT EXISTS memory_log (
     novelty_score FLOAT DEFAULT 0.5,
     -- [6] Nivel de abstracción (0=concreto, 3=esquema abstracto)
     abstraction_level INT DEFAULT 0,
+    -- [L0] Keyphrases automáticas (KeyBERT + tags canonicalizados)
+    keyphrases TEXT[] DEFAULT '{}',
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -136,6 +138,9 @@ CREATE TABLE IF NOT EXISTS memory_relations (
     reinforcement_count INTEGER DEFAULT 1,
     last_activated_at TIMESTAMPTZ,
     active BOOLEAN NOT NULL DEFAULT TRUE,
+    -- [L1] Myelination: conductivity score for cross-project relations
+    myelin_score FLOAT DEFAULT 0.0,
+    myelin_last_updated TIMESTAMPTZ DEFAULT NOW(),
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     CONSTRAINT memory_relations_no_self CHECK (source_memory_id <> target_memory_id),
@@ -191,6 +196,69 @@ CREATE TABLE IF NOT EXISTS deep_sleep_runs (
     started_at TIMESTAMPTZ DEFAULT NOW(),
     finished_at TIMESTAMPTZ
 );
+
+-- [L0] Synapse candidates: Tier 3 holding area until sleep validates
+CREATE TABLE IF NOT EXISTS synapse_candidates (
+    id SERIAL PRIMARY KEY,
+    source_memory_id UUID NOT NULL REFERENCES memory_log(id) ON DELETE CASCADE,
+    target_memory_id UUID NOT NULL REFERENCES memory_log(id) ON DELETE CASCADE,
+    semantic_score FLOAT NOT NULL,
+    domain_score FLOAT NOT NULL,
+    lexical_overlap FLOAT NOT NULL,
+    emotional_proximity FLOAT NOT NULL,
+    importance_attraction FLOAT NOT NULL,
+    temporal_proximity FLOAT NOT NULL,
+    type_compatibility FLOAT NOT NULL,
+    combined_score FLOAT NOT NULL,
+    suggested_type VARCHAR(50),
+    status VARCHAR(20) DEFAULT 'pending',
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    reviewed_at TIMESTAMPTZ,
+    CONSTRAINT synapse_candidates_unique UNIQUE (source_memory_id, target_memory_id)
+);
+
+-- [L1] Project permeability: continuous score replacing binary bridges
+CREATE TABLE IF NOT EXISTS project_permeability (
+    id SERIAL PRIMARY KEY,
+    project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    related_project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    permeability_score FLOAT DEFAULT 0.0,
+    organic_origin BOOLEAN DEFAULT TRUE,
+    formation_reason TEXT,
+    last_activity TIMESTAMPTZ DEFAULT NOW(),
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    CONSTRAINT project_permeability_unique UNIQUE (project_id, related_project_id)
+);
+
+-- [L1] Myelination events audit log
+CREATE TABLE IF NOT EXISTS myelination_events (
+    id SERIAL PRIMARY KEY,
+    relation_id UUID REFERENCES memory_relations(id) ON DELETE CASCADE,
+    permeability_id INTEGER REFERENCES project_permeability(id) ON DELETE CASCADE,
+    event_type VARCHAR(50) NOT NULL,
+    delta FLOAT NOT NULL,
+    new_score FLOAT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- [L2] Sleep cycles tracking (NREM + REM)
+CREATE TABLE IF NOT EXISTS sleep_cycles (
+    id SERIAL PRIMARY KEY,
+    cycle_type VARCHAR(10) NOT NULL,
+    started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at TIMESTAMPTZ,
+    trigger_reason TEXT,
+    projects_processed TEXT[],
+    stats JSONB DEFAULT '{}'::jsonb
+);
+
+CREATE INDEX IF NOT EXISTS idx_synapse_candidates_status ON synapse_candidates(status);
+CREATE INDEX IF NOT EXISTS idx_synapse_candidates_score ON synapse_candidates(combined_score DESC);
+CREATE INDEX IF NOT EXISTS idx_project_permeability_score ON project_permeability(permeability_score DESC);
+CREATE INDEX IF NOT EXISTS idx_myelination_events_relation ON myelination_events(relation_id);
+CREATE INDEX IF NOT EXISTS idx_myelination_events_created ON myelination_events(created_at);
+CREATE INDEX IF NOT EXISTS idx_sleep_cycles_type ON sleep_cycles(cycle_type);
+CREATE INDEX IF NOT EXISTS idx_sleep_cycles_started ON sleep_cycles(started_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_state ON tasks(state);
