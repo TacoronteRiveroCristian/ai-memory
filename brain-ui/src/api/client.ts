@@ -3,6 +3,7 @@ import type {
   FacetsResponse,
   MemoryDetailResponse,
   HealthResponse,
+  BrainHealthResponse,
 } from "../types";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8050";
@@ -53,5 +54,11 @@ export async function fetchMemoryDetail(
 export async function fetchHealth(): Promise<HealthResponse> {
   const res = await fetch(`${API_URL}/health`);
   if (!res.ok) throw new Error(`health failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchBrainHealth(): Promise<BrainHealthResponse> {
+  const res = await fetch(`${API_URL}/brain/health`, { headers });
+  if (!res.ok) throw new Error(`brain health failed: ${res.status}`);
   return res.json();
 }

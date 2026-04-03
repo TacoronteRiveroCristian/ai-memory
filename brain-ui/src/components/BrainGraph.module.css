@@ -43,7 +43,17 @@
 .legendLine {
   width: 16px;
   height: 0;
-  border-top: 1.5px dashed #a78bfa;
+  border-top: 1.5px dashed #54a0ff;
+  display: inline-block;
+  vertical-align: middle;
+}
+
+.legendGlow {
+  width: 16px;
+  height: 4px;
+  border-radius: 2px;
+  background: #4ecdc4;
+  box-shadow: 0 0 6px rgba(78, 205, 196, 0.6);
   display: inline-block;
   vertical-align: middle;
 }

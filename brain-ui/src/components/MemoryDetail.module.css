@@ -1,5 +1,5 @@
 .sidebar {
-  width: 280px;
+  width: 380px;
   background: #0f0f1a;
   border-left: 1px solid #1e1e3a;
   padding: 16px;
@@ -7,12 +7,17 @@
   font-size: 12px;
   color: #ccc;
   flex-shrink: 0;
-  transition: transform 0.2s ease;
+  animation: slideIn 0.2s ease;
+}
+
+@keyframes slideIn {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
 }
 
 .header {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
   margin-bottom: 14px;
 }
@@ -22,13 +27,25 @@
   height: 10px;
   border-radius: 50%;
   flex-shrink: 0;
+  margin-top: 4px;
+}
+
+.headerText {
+  flex: 1;
+  min-width: 0;
 }
 
 .title {
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 600;
   color: #fff;
   line-height: 1.3;
+}
+
+.projectLabel {
+  font-size: 10px;
+  color: #666;
+  margin-top: 2px;
 }
 
 .closeBtn {
@@ -39,83 +56,188 @@
   font-size: 16px;
   cursor: pointer;
   padding: 0 4px;
+  flex-shrink: 0;
 }
-
-.closeBtn:hover {
-  color: #ccc;
-}
+.closeBtn:hover { color: #ccc; }
 
 .badges {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
-  margin-bottom: 14px;
+  margin-bottom: 12px;
 }
 
 .badge {
-  background: #1a1a2e;
-  border: 1px solid #2a2a4a;
   border-radius: 4px;
-  padding: 3px 8px;
+  padding: 2px 8px;
   font-size: 10px;
-  color: #888;
 }
 
 .badgeType {
+  background: #1a1a2e;
   color: #a78bfa;
+  border: 1px solid #a78bfa44;
 }
 
-.summary {
-  color: #999;
+.badgeTag {
+  background: transparent;
+  color: #888;
+  border: 1px solid #2a2a4a;
+}
+
+.content {
+  color: #aaa;
   font-size: 12px;
   line-height: 1.5;
-  margin-bottom: 16px;
-  padding-bottom: 14px;
+  margin-bottom: 14px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #1a1a2e;
+  max-height: 150px;
+  overflow-y: auto;
+}
+
+.section {
+  margin-bottom: 14px;
+  padding-bottom: 12px;
   border-bottom: 1px solid #1a1a2e;
 }
 
-.scoreGrid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-  margin-bottom: 16px;
+.sectionLabel {
+  font-size: 9px;
+  color: #666;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 8px;
 }
 
-.scoreCard {
-  background: #12121f;
-  border-radius: 6px;
-  padding: 8px 10px;
+/* Keyphrases */
+.keyphrases {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.keyphrase {
+  background: #162030;
+  border: 1px solid #1e3a5f;
+  border-radius: 12px;
+  padding: 2px 10px;
+  font-size: 10px;
+  color: #54a0ff;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.keyphrase:hover {
+  background: #1e3a5f;
+}
+
+/* Score Grid */
+.scoreGrid {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.scoreItem {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.scoreHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
 }
 
 .scoreLabel {
-  font-size: 9px;
+  font-size: 10px;
   color: #666;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
 }
 
-.scoreValue {
-  font-size: 18px;
-  font-weight: 700;
+.scoreNum {
+  font-size: 11px;
+  font-weight: 600;
+  font-family: "SF Mono", "Fira Code", monospace;
 }
 
-.decaySection {
-  margin-bottom: 16px;
+.scoreBarTrack {
+  background: #12121f;
+  border-radius: 2px;
+  height: 4px;
+  overflow: hidden;
 }
 
-.decayLabel {
-  font-size: 9px;
-  color: #666;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
+.scoreBarFill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+
+/* Emotional Axes */
+.emotionRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   margin-bottom: 6px;
 }
 
+.emotionLabel {
+  font-size: 10px;
+  color: #666;
+  width: 50px;
+  flex-shrink: 0;
+}
+
+.emotionValue {
+  font-size: 10px;
+  color: #888;
+  font-family: "SF Mono", "Fira Code", monospace;
+  width: 40px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.valenceBar {
+  flex: 1;
+  height: 6px;
+  border-radius: 3px;
+  background: linear-gradient(90deg, #ff6b6b, #444 50%, #4ecdc4);
+  position: relative;
+}
+
+.valenceMarker {
+  position: absolute;
+  top: -2px;
+  width: 4px;
+  height: 10px;
+  border-radius: 2px;
+  background: #fff;
+  transform: translateX(-50%);
+}
+
+.arousalBar {
+  flex: 1;
+  height: 6px;
+  border-radius: 3px;
+  background: #12121f;
+  overflow: hidden;
+}
+
+.arousalFill {
+  height: 100%;
+  border-radius: 3px;
+  background: linear-gradient(90deg, #666, #ffa94d);
+  transition: width 0.3s ease;
+}
+
+/* Decay */
 .decayBar {
   background: #12121f;
   border-radius: 4px;
   height: 6px;
   overflow: hidden;
+  margin-bottom: 4px;
 }
 
 .decayFill {
@@ -128,11 +250,84 @@
 .decayMeta {
   display: flex;
   justify-content: space-between;
-  margin-top: 4px;
   font-size: 9px;
   color: #555;
 }
 
+/* Relations */
+.relationList {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 250px;
+  overflow-y: auto;
+}
+
+.relationItem {
+  background: #12121f;
+  border-radius: 6px;
+  padding: 8px;
+  cursor: pointer;
+  transition: background 0.15s;
+  position: relative;
+}
+.relationItem:hover {
+  background: #1a1a30;
+}
+.relationHovered {
+  background: #1a1a30;
+}
+
+.relationBadges {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 4px;
+}
+
+.relationTypeBadge {
+  font-size: 9px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  border: 1px solid;
+  background: transparent;
+}
+
+.tierBadge {
+  font-size: 9px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  color: #000;
+  font-weight: 700;
+}
+
+.relationPreview {
+  font-size: 11px;
+  color: #999;
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.relationTooltip {
+  position: absolute;
+  right: 8px;
+  top: -4px;
+  background: #1a1a2e;
+  border: 1px solid #2a2a4a;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 10px;
+  color: #aaa;
+  z-index: 10;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+
+/* Meta footer */
 .metaList {
   font-size: 11px;
   color: #555;
@@ -148,13 +343,8 @@
   justify-content: space-between;
 }
 
-.metaValue {
-  color: #888;
-}
-
-.metaHighlight {
-  color: #4ecdc4;
-}
+.metaValue { color: #888; }
+.metaHighlight { color: #4ecdc4; }
 
 .loading {
   display: flex;

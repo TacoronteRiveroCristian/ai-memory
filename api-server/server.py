@@ -996,6 +996,7 @@ def build_graph_node(record: dict[str, Any]) -> dict[str, Any]:
         "access_count": int(serialized.get("access_count", 0) or 0),
         "manual_pin": bool(serialized.get("manual_pin", False)),
         "prominence": compute_memory_prominence(record),
+        "keyphrases": serialized.get("keyphrases", []) or [],
     }
 
 
@@ -1945,6 +1946,7 @@ async def get_relations_for_memory(memory_id: str) -> list[dict[str, Any]]:
                 mr.weight,
                 mr.origin,
                 mr.evidence_json,
+                mr.myelin_score,
                 mr.reinforcement_count,
                 mr.last_activated_at,
                 mr.active,
@@ -2119,6 +2121,7 @@ async def fetch_relation_rows_touching(
                 mr.weight,
                 mr.origin,
                 mr.evidence_json,
+                mr.myelin_score,
                 mr.reinforcement_count,
                 mr.last_activated_at,
                 mr.active,
@@ -2171,6 +2174,7 @@ async def fetch_relation_rows_between(
                 mr.weight,
                 mr.origin,
                 mr.evidence_json,
+                mr.myelin_score,
                 mr.reinforcement_count,
                 mr.last_activated_at,
                 mr.active,
@@ -2214,6 +2218,8 @@ def build_graph_edge(row: dict[str, Any]) -> dict[str, Any]:
         "active": bool(row.get("active", False)),
         "reinforcement_count": int(row.get("reinforcement_count", 0) or 0),
         "last_activated_at": row.get("last_activated_at"),
+        "myelin_score": round(float(row.get("myelin_score", 0.0) or 0.0), 4),
+        "evidence_json": row.get("evidence_json") or None,
     }
 
 

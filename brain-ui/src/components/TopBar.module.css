@@ -9,6 +9,12 @@
   flex-shrink: 0;
 }
 
+.left {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+}
+
 .logo {
   font-size: 17px;
   font-weight: 700;

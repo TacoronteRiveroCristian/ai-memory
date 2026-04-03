@@ -1,9 +1,12 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { fetchSubgraph, fetchFacets } from "./api/client";
 import type { GraphNode, GraphEdge, FacetProject, SubgraphResponse } from "./types";
+import type { TabId } from "./components/TabSwitcher";
 import TopBar from "./components/TopBar";
+import StatsBar from "./components/StatsBar";
 import BrainGraph from "./components/BrainGraph";
 import MemoryDetail from "./components/MemoryDetail";
+import HealthView from "./components/HealthView";
 import styles from "./App.module.css";
 
 function mergeSubgraphs(responses: SubgraphResponse[]): {
@@ -42,7 +45,8 @@ function filterByKeyword(
       n.content_preview.toLowerCase().includes(lower) ||
       n.tags.some((t) => t.toLowerCase().includes(lower)) ||
       n.memory_type.toLowerCase().includes(lower) ||
-      n.project.toLowerCase().includes(lower)
+      n.project.toLowerCase().includes(lower) ||
+      (n.keyphrases ?? []).some((kp) => kp.toLowerCase().includes(lower))
   );
   const nodeIds = new Set(matchingNodes.map((n) => n.memory_id));
   const matchingEdges = edges.filter(
@@ -60,6 +64,8 @@ export default function App() {
   const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<TabId>("graph");
+  const [externalHoveredNodeId, setExternalHoveredNodeId] = useState<string | null>(null);
   const projectsRef = useRef<FacetProject[]>([]);
 
   const loadGraph = useCallback(
@@ -68,7 +74,6 @@ export default function App() {
       setLoading(true);
       setError(null);
       try {
-        // Determine which projects to fetch
         const targetProjects =
           selected.size === 0
             ? available.map((p) => p.project)
@@ -121,9 +126,12 @@ export default function App() {
     setKeyword(kw);
   };
 
-  // Apply client-side keyword filter on top of loaded data
-  const { nodes, edges } = filterByKeyword(allNodes, allEdges, keyword);
+  const handleNodeNavigate = (memoryId: string) => {
+    const node = allNodes.find((n) => n.memory_id === memoryId);
+    if (node) setSelectedNode(node);
+  };
 
+  const { nodes, edges } = filterByKeyword(allNodes, allEdges, keyword);
   const projectList = projects.map((p) => p.project);
 
   return (
@@ -134,37 +142,61 @@ export default function App() {
         onProjectChange={handleProjectChange}
         keyword={keyword}
         onKeywordChange={handleKeywordChange}
+        activeTab={activeTab}
+        onTabChange={setActiveTab}
       />
-      <div className={styles.main}>
-        {loading ? (
-          <div className={styles.loading}>Loading brain...</div>
-        ) : error ? (
-          <div className={styles.error}>
-            <span>{error}</span>
-            <button
-              className={styles.retryBtn}
-              onClick={() => loadGraph(selectedProjects)}
-            >
-              Retry
-            </button>
-          </div>
-        ) : (
-          <BrainGraph
+
+      {activeTab === "graph" && (
+        <>
+          <StatsBar
             nodes={nodes}
             edges={edges}
-            projectList={projectList}
-            selectedProject={selectedProjects.size === 1 ? [...selectedProjects][0] : null}
-            onNodeClick={setSelectedNode}
-            onBackgroundClick={() => setSelectedNode(null)}
+            totalNodes={allNodes.length}
+            totalEdges={allEdges.length}
+            keyword={keyword}
           />
-        )}
-        {selectedNode && (
-          <MemoryDetail
-            node={selectedNode}
-            onClose={() => setSelectedNode(null)}
-          />
-        )}
-      </div>
+          <div className={styles.main}>
+            {loading ? (
+              <div className={styles.loading}>Loading brain...</div>
+            ) : error ? (
+              <div className={styles.error}>
+                <span>{error}</span>
+                <button className={styles.retryBtn} onClick={() => loadGraph(selectedProjects)}>
+                  Retry
+                </button>
+              </div>
+            ) : (
+              <BrainGraph
+                nodes={nodes}
+                edges={edges}
+                projectList={projectList}
+                selectedProject={selectedProjects.size === 1 ? [...selectedProjects][0] : null}
+                selectedProjects={selectedProjects}
+                onNodeClick={setSelectedNode}
+                onBackgroundClick={() => setSelectedNode(null)}
+                externalHoveredNodeId={externalHoveredNodeId}
+              />
+            )}
+            {selectedNode && (
+              <MemoryDetail
+                node={selectedNode}
+                edges={edges}
+                graphNodes={nodes}
+                onClose={() => setSelectedNode(null)}
+                onNodeNavigate={handleNodeNavigate}
+                onRelationHover={setExternalHoveredNodeId}
+                onKeyphraseClick={(kp) => handleKeywordChange(kp)}
+              />
+            )}
+          </div>
+        </>
+      )}
+
+      {activeTab === "health" && (
+        <div className={styles.main}>
+          <HealthView />
+        </div>
+      )}
     </div>
   );
 }

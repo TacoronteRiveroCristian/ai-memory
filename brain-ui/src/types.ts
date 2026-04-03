@@ -9,6 +9,7 @@ export interface GraphNode {
   access_count: number;
   manual_pin: boolean;
   prominence: number;
+  keyphrases: string[];
 }
 
 export interface GraphEdge {
@@ -20,6 +21,13 @@ export interface GraphEdge {
   active: boolean;
   reinforcement_count: number;
   last_activated_at: string | null;
+  myelin_score: number;
+  evidence_json?: {
+    tier: 1 | 2 | 3;
+    relation_type: string;
+    reason: string;
+    signals: Record<string, number>;
+  } | null;
 }
 
 export interface GraphSummary {
@@ -82,12 +90,59 @@ export interface MemoryDetailResponse {
     arousal: number;
     novelty_score: number;
     abstraction_level: number;
+    keyphrases: string[];
   };
   relation_count: number;
+  relations: Array<{
+    relation_type: string;
+    target_memory_id: string;
+    weight: number;
+    origin: string;
+  }>;
 }
 
 export interface HealthResponse {
   status: string;
   timestamp: string;
   test_mode: boolean;
+}
+
+export interface BrainHealthResponse {
+  overall_health: number;
+  timestamp: string;
+  regions: Record<string, {
+    memory_count: number;
+    active_synapses: number;
+    avg_activation: number;
+    schemas_count: number;
+    orphan_memories: number;
+    orphan_ratio: number;
+    keyphrases_coverage: number;
+    last_nrem: string | null;
+  }>;
+  connectivity: Record<string, {
+    permeability_score: number;
+    myelinated_relations: number;
+    avg_myelin_score: number;
+    organic_origin: boolean;
+    formation_reason: string;
+  }>;
+  synapse_formation: {
+    tier1_instant: number;
+    tier2_confirmed: number;
+    tier3_candidates_pending: number;
+    tier3_promoted: number;
+    tier3_rejected: number;
+  };
+  sleep: {
+    last_nrem: string | null;
+    last_rem: string | null;
+    cross_activity_score: number;
+    rem_threshold: number;
+  };
+  alerts: Array<{
+    type: string;
+    severity: "info" | "warning" | "critical";
+    message: string;
+  }>;
 }

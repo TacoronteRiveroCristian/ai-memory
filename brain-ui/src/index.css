@@ -1,0 +1,20 @@
+/* Dark scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #0a0a12;
+}
+::-webkit-scrollbar-thumb {
+  background: #2a2a4a;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #3a3a5a;
+}
+/* Firefox */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #2a2a4a #0a0a12;
+}

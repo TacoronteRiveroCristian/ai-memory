@@ -1,6 +1,8 @@
 import { useState, useEffect } from "react";
 import { fetchHealth } from "../api/client";
 import type { FacetProject } from "../types";
+import type { TabId } from "./TabSwitcher";
+import TabSwitcher from "./TabSwitcher";
 import ProjectSelector from "./ProjectSelector";
 import KeywordFilter from "./KeywordFilter";
 import styles from "./TopBar.module.css";
@@ -11,6 +13,8 @@ interface TopBarProps {
   onProjectChange: (projects: Set<string>) => void;
   keyword: string;
   onKeywordChange: (keyword: string) => void;
+  activeTab: TabId;
+  onTabChange: (tab: TabId) => void;
 }
 
 export default function TopBar({
@@ -19,6 +23,8 @@ export default function TopBar({
   onProjectChange,
   keyword,
   onKeywordChange,
+  activeTab,
+  onTabChange,
 }: TopBarProps) {
   const [healthy, setHealthy] = useState(true);
 
@@ -38,7 +44,10 @@ export default function TopBar({
 
   return (
     <div className={styles.topbar}>
-      <div className={styles.logo}>&#x1f9e0; AI Memory Brain</div>
+      <div className={styles.left}>
+        <div className={styles.logo}>{"\u{1f9e0}"} AI Memory Brain</div>
+        <TabSwitcher activeTab={activeTab} onTabChange={onTabChange} />
+      </div>
       <div className={styles.right}>
         <KeywordFilter value={keyword} onChange={onKeywordChange} />
         <ProjectSelector

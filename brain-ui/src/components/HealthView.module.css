@@ -1,0 +1,326 @@
+.container {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: 16px;
+  align-content: start;
+}
+
+.loading, .error {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 200px;
+  color: #555;
+  font-size: 14px;
+}
+.error { color: #ff6b6b; }
+
+.card {
+  background: #0d0d1a;
+  border: 1px solid #1e1e3a;
+  border-radius: 10px;
+  padding: 18px;
+}
+
+.healthCard {
+  grid-column: 1 / -1;
+  text-align: center;
+}
+
+.cardTitle {
+  font-size: 11px;
+  color: #666;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 12px;
+}
+
+.cardMeta {
+  font-size: 10px;
+  color: #444;
+  margin-top: 8px;
+}
+
+/* Overall Health */
+.healthScore {
+  font-size: 48px;
+  font-weight: 700;
+  font-family: "SF Mono", "Fira Code", monospace;
+  margin-bottom: 10px;
+}
+
+.healthBar {
+  background: #12121f;
+  border-radius: 6px;
+  height: 10px;
+  overflow: hidden;
+  max-width: 400px;
+  margin: 0 auto;
+}
+
+.healthFill {
+  height: 100%;
+  border-radius: 6px;
+  transition: width 0.5s ease;
+}
+
+/* Synapse Formation */
+.synapseGrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 12px;
+  text-align: center;
+}
+
+.synapseTier {
+  background: #12121f;
+  border-radius: 8px;
+  padding: 12px 8px;
+}
+
+.synapseNum {
+  font-size: 28px;
+  font-weight: 700;
+  font-family: "SF Mono", "Fira Code", monospace;
+}
+
+.synapseLabel {
+  font-size: 10px;
+  color: #666;
+  margin-top: 4px;
+}
+
+.t3Detail {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 6px;
+  font-size: 9px;
+}
+
+.t3Promoted { color: #4ecdc4; }
+.t3Pending { color: #ffd93d; }
+.t3Rejected { color: #ff6b6b; }
+
+/* Section summary */
+.sectionSummary {
+  font-size: 11px;
+  color: #888;
+  margin-bottom: 10px;
+}
+
+/* Toggle button */
+.toggleBtn {
+  display: block;
+  margin: 10px auto 0;
+  padding: 5px 14px;
+  background: #1a1a2e;
+  border: 1px solid #2a2a4a;
+  border-radius: 6px;
+  color: #888;
+  font-size: 10px;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s;
+}
+.toggleBtn:hover {
+  background: #2a2a4a;
+  color: #ccc;
+}
+
+/* Full-width cards for sections with inner grids */
+.wideCard {
+  grid-column: 1 / -1;
+}
+
+/* Regions */
+.regionGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 8px;
+}
+
+.regionItem {
+  background: #12121f;
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.regionName {
+  font-size: 12px;
+  font-weight: 600;
+  color: #ccc;
+  margin-bottom: 4px;
+}
+
+.regionStats {
+  display: flex;
+  gap: 12px;
+  font-size: 10px;
+  color: #666;
+  margin-bottom: 6px;
+}
+
+/* Connectivity */
+.connectGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 8px;
+}
+
+.connectItem {
+  background: #12121f;
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.connectPair {
+  font-size: 11px;
+  color: #ccc;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.connectMeta {
+  font-size: 9px;
+  color: #666;
+  margin-top: 4px;
+}
+
+/* Shared Mini Bar */
+.miniBarGroup {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.miniBarLabel {
+  font-size: 9px;
+  color: #666;
+  width: 65px;
+  flex-shrink: 0;
+}
+
+.miniBarTrack {
+  flex: 1;
+  background: #1a1a2e;
+  border-radius: 2px;
+  height: 4px;
+  overflow: hidden;
+}
+
+.miniBarFill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+
+.miniBarValue {
+  font-size: 9px;
+  color: #888;
+  font-family: "SF Mono", "Fira Code", monospace;
+  width: 30px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+/* Sleep */
+.sleepGrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.sleepItem {
+  background: #12121f;
+  border-radius: 6px;
+  padding: 8px;
+  text-align: center;
+}
+
+.sleepLabel {
+  display: block;
+  font-size: 9px;
+  color: #666;
+  margin-bottom: 4px;
+}
+
+.sleepValue {
+  font-size: 13px;
+  color: #ccc;
+  font-weight: 600;
+}
+
+.remNeeded {
+  margin-top: 8px;
+  padding: 6px;
+  background: #2a1515;
+  border: 1px solid #ff6b6b44;
+  border-radius: 6px;
+  color: #ff6b6b;
+  font-size: 11px;
+  text-align: center;
+}
+
+/* Alerts */
+.alertList {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+  gap: 6px;
+}
+
+.alert {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  color: #ccc;
+}
+
+.alertSeverity {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+
+.alert_info {
+  background: #0d1a2e;
+  border: 1px solid #54a0ff33;
+}
+.alert_info .alertSeverity {
+  background: #54a0ff22;
+  color: #54a0ff;
+}
+
+.alert_warning {
+  background: #1a1a0d;
+  border: 1px solid #ffd93d33;
+}
+.alert_warning .alertSeverity {
+  background: #ffd93d22;
+  color: #ffd93d;
+}
+
+.alert_critical {
+  background: #1a0d0d;
+  border: 1px solid #ff6b6b33;
+}
+.alert_critical .alertSeverity {
+  background: #ff6b6b22;
+  color: #ff6b6b;
+}
+
+.allClear {
+  color: #4ecdc4;
+  font-size: 13px;
+  text-align: center;
+  padding: 16px;
+}
