@@ -1,6 +1,6 @@
 import styles from "./TabSwitcher.module.css";
 
-export type TabId = "graph" | "health";
+export type TabId = "graph" | "health" | "guide";
 
 interface TabSwitcherProps {
   activeTab: TabId;
@@ -10,6 +10,7 @@ interface TabSwitcherProps {
 const TABS: { id: TabId; label: string }[] = [
   { id: "graph", label: "\u{1f9e0} Graph" },
   { id: "health", label: "\u2764 Health" },
+  { id: "guide", label: "\u{1f4d6} Guide" },
 ];
 
 export default function TabSwitcher({ activeTab, onTabChange }: TabSwitcherProps) {
