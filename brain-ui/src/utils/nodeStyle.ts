@@ -1,4 +1,4 @@
-import type { GraphNode, GraphEdge } from "../types";
+import type { GraphNode } from "../types";
 
 // Node colors
 const COLOR_RED = "#ff6b6b";

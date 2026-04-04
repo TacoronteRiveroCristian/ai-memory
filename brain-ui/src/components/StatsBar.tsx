@@ -9,7 +9,7 @@ interface StatsBarProps {
   keyword: string;
 }
 
-export default function StatsBar({ nodes, edges, totalNodes, totalEdges, keyword }: StatsBarProps) {
+export default function StatsBar({ nodes, edges, totalNodes, totalEdges: _totalEdges, keyword }: StatsBarProps) {
   const decaying = nodes.filter((n) => n.stability_score < 0.3).length;
   const hot = nodes.filter((n) => n.activation_score > 0.7).length;
   const pinned = nodes.filter((n) => n.manual_pin).length;

@@ -1,5 +1,6 @@
 import logging
 import os
+import time
 from typing import Any, Callable, Dict, List, Optional
 
 from dotenv import load_dotenv
@@ -138,7 +139,18 @@ def require_memory() -> Memory:
     return MEMORY_INSTANCE
 
 
-init_memory_instance(DEFAULT_CONFIG)
+STARTUP_MAX_RETRIES = 10
+STARTUP_RETRY_DELAY = 5  # seconds
+
+for _attempt in range(1, STARTUP_MAX_RETRIES + 1):
+    init_memory_instance(DEFAULT_CONFIG)
+    if MEMORY_INSTANCE is not None:
+        break
+    logger.warning("Mem0 init attempt %d/%d failed, retrying in %ds...", _attempt, STARTUP_MAX_RETRIES, STARTUP_RETRY_DELAY)
+    time.sleep(STARTUP_RETRY_DELAY)
+
+if MEMORY_INSTANCE is None:
+    logger.error("Mem0 failed to initialize after %d attempts — will retry on next health check", STARTUP_MAX_RETRIES)
 
 app = FastAPI(title="Mem0 REST APIs", version="1.1.0")
 
@@ -195,6 +207,9 @@ def execute_memory_call(
 
 @app.get("/health")
 def health():
+    if MEMORY_INSTANCE is None:
+        logger.info("Memory not initialized, attempting recovery...")
+        init_memory_instance(DEFAULT_CONFIG)
     payload = {
         "status": "ok" if MEMORY_INSTANCE is not None else "degraded",
         "llm_provider": DEFAULT_CONFIG["llm"]["provider"],

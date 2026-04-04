@@ -215,7 +215,7 @@ services:
     container_name: ai-memory-brain-ui
     restart: unless-stopped
     ports:
-      - "3000:80"
+      - "3080:80"
     depends_on:
       api-server:
         condition: service_healthy
