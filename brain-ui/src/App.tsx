@@ -7,6 +7,7 @@ import StatsBar from "./components/StatsBar";
 import BrainGraph from "./components/BrainGraph";
 import MemoryDetail from "./components/MemoryDetail";
 import HealthView from "./components/HealthView";
+import GuideView from "./components/GuideView";
 import styles from "./App.module.css";
 
 function mergeSubgraphs(responses: SubgraphResponse[]): {
@@ -195,6 +196,12 @@ export default function App() {
       {activeTab === "health" && (
         <div className={styles.main}>
           <HealthView />
+        </div>
+      )}
+
+      {activeTab === "guide" && (
+        <div className={styles.main}>
+          <GuideView />
         </div>
       )}
     </div>
