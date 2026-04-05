@@ -311,3 +311,71 @@ def test_plasticity_reinforces_auto_relations_and_preserves_manual_links(brain_c
     assert manual_relation["origin"] == "manual"
     assert manual_relation["active"] is True
     assert float(manual_relation["weight"]) >= 0.77
+
+
+def test_novelty_merge_deduplicates_near_identical_memories(brain_client, unique_project_name):
+    """When a new memory is >85% similar to an existing one (novelty < 0.15),
+    it should merge into the existing memory instead of creating a duplicate."""
+    project = unique_project_name("novelty-merge")
+
+    original = brain_client.create_memory(
+        content="PostgreSQL partial indexes speed up filtered queries on large tables significantly.",
+        project=project,
+        memory_type="general",
+        tags="tech/postgres,pattern/indexing",
+        importance=0.7,
+        agent_id="pytest",
+    )
+    original_id = original["memory_id"]
+
+    duplicate = brain_client.create_memory(
+        content="PostgreSQL partial indexes speed up filtered queries on large tables significantly.",
+        project=project,
+        memory_type="general",
+        tags="tech/postgres,pattern/indexing",
+        importance=0.8,
+        agent_id="pytest",
+    )
+
+    assert duplicate.get("merged_into") == original_id or duplicate.get("action") == "merged"
+
+    search = brain_client.structured_search(
+        query="PostgreSQL partial indexes filtered queries",
+        project=project,
+        scope="project",
+        limit=5,
+        register_access=False,
+    )
+    matching_ids = [r["memory_id"] for r in search["results"]]
+    assert original_id in matching_ids
+    postgres_results = [r for r in search["results"] if "partial indexes" in r["content"]]
+    assert len(postgres_results) == 1
+
+
+def test_novelty_merge_preserves_distinct_memories(brain_client, unique_project_name):
+    """Memories with genuinely different content should NOT be merged."""
+    project = unique_project_name("novelty-distinct")
+
+    mem_a = brain_client.create_memory(
+        content="Redis pub/sub enables real-time event broadcasting between microservices.",
+        project=project,
+        memory_type="general",
+        tags="tech/redis,pattern/pubsub",
+        importance=0.7,
+        agent_id="pytest",
+    )["memory_id"]
+
+    mem_b = brain_client.create_memory(
+        content="PostgreSQL LISTEN/NOTIFY provides lightweight change notification without polling.",
+        project=project,
+        memory_type="general",
+        tags="tech/postgres,pattern/notification",
+        importance=0.7,
+        agent_id="pytest",
+    )["memory_id"]
+
+    assert mem_a != mem_b
+    detail_a = brain_client.memory_detail(mem_a)
+    detail_b = brain_client.memory_detail(mem_b)
+    assert detail_a is not None
+    assert detail_b is not None

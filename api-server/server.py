@@ -97,6 +97,7 @@ AUTO_LINK_CANDIDATE_LIMIT = 6
 AUTO_LINK_SCORE_THRESHOLD = 0.78
 ACTIVATION_PROPAGATION_TTL = 900          # 15 min en Redis
 ACTIVATION_PROPAGATION_DECAY = 0.4        # factor de decaimiento por salto
+NOVELTY_MERGE_THRESHOLD = 0.15            # novelty below this triggers merge instead of new memory
 DEEP_SLEEP_INTERVAL = int(os.environ.get("DEEP_SLEEP_INTERVAL_SECONDS", "86400"))  # 24h
 PG_POOL_MAX_SIZE = int(os.environ.get("PG_POOL_MAX_SIZE", "8"))
 PG_POOL_MIN_SIZE = int(os.environ.get("PG_POOL_MIN_SIZE", "1"))
@@ -3007,6 +3008,7 @@ async def store_memory(
 
     Devuelve:
     - `OK ...` si la memoria se guardó.
+    - `MERGED ...` si se encontró una memoria casi idéntica y se reforzó la existente.
     - `SKIP ...` si se omitió por alta similitud con otra memoria existente.
     - `ERROR ...` si ocurrió un fallo.
     """
@@ -3023,6 +3025,52 @@ async def store_memory(
                 )
 
         embedding = await get_embedding(content)
+
+        # Check for near-duplicate to merge into (novelty-based dedup)
+        merge_target = None
+        try:
+            merge_candidates = await qdrant.query_points(
+                collection_name=COLLECTION_NAME,
+                query=embedding,
+                using="content",
+                query_filter=Filter(must=[
+                    FieldCondition(key="project_id", match=MatchValue(value=project)),
+                    FieldCondition(key="memory_type", match=MatchValue(value=memory_type)),
+                ]),
+                limit=1,
+                with_payload=True,
+                score_threshold=0.85,
+            )
+            if merge_candidates.points:
+                top = merge_candidates.points[0]
+                novelty = round(1.0 - float(top.score), 3)
+                if novelty < NOVELTY_MERGE_THRESHOLD:
+                    merge_target = top
+        except Exception:
+            logger.debug("Novelty merge check failed, proceeding with normal store")
+
+        if merge_target is not None:
+            existing_id = str(merge_target.id)
+            existing_payload = merge_target.payload or {}
+            existing_importance = float(existing_payload.get("importance", 0.5))
+            merged_importance = round(min(1.0, max(existing_importance, importance) + 0.05), 3)
+            await qdrant.set_payload(
+                collection_name=COLLECTION_NAME,
+                payload={"importance": merged_importance},
+                points=[existing_id],
+            )
+            if pg_pool:
+                async with pg_pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE memory_log SET importance = $1 WHERE id = $2",
+                        merged_importance, uuid.UUID(existing_id),
+                    )
+            logger.info(
+                "Novelty merge: new memory merged into %s (novelty=%.3f, importance %.2f→%.2f)",
+                existing_id, 1.0 - float(merge_target.score), existing_importance, merged_importance,
+            )
+            return f"MERGED into={existing_id} project={project} type={memory_type} novelty={1.0 - float(merge_target.score):.3f}"
+
         # [L0] Extract keyphrases and compute domain embedding
         keyphrases = extract_keyphrases(content, tags_list)
         domain_text = " ".join(keyphrases) if keyphrases else content
@@ -3751,6 +3799,13 @@ async def create_memory(payload: MemoryCreateRequest):
     if result.startswith("ERROR"):
         raise HTTPException(status_code=500, detail=result)
     fields = parse_result_fields(result)
+    if result.startswith("MERGED"):
+        return {
+            "result": result,
+            "action": "merged",
+            "merged_into": fields.get("into", ""),
+            "memory_id": fields.get("into", ""),
+        }
     return {"result": result, "memory_id": fields.get("memory_id")}
 
 
