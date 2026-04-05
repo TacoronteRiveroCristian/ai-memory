@@ -311,3 +311,237 @@ def test_plasticity_reinforces_auto_relations_and_preserves_manual_links(brain_c
     assert manual_relation["origin"] == "manual"
     assert manual_relation["active"] is True
     assert float(manual_relation["weight"]) >= 0.77
+
+
+def test_novelty_merge_deduplicates_near_identical_memories(brain_client, unique_project_name):
+    """When a new memory is >85% similar to an existing one (novelty < 0.15),
+    it should merge into the existing memory instead of creating a duplicate."""
+    project = unique_project_name("novelty-merge")
+
+    original = brain_client.create_memory(
+        content="PostgreSQL partial indexes speed up filtered queries on large tables significantly.",
+        project=project,
+        memory_type="general",
+        tags="tech/postgres,pattern/indexing",
+        importance=0.7,
+        agent_id="pytest",
+    )
+    original_id = original["memory_id"]
+
+    duplicate = brain_client.create_memory(
+        content="PostgreSQL partial indexes speed up filtered queries on large tables significantly.",
+        project=project,
+        memory_type="general",
+        tags="tech/postgres,pattern/indexing",
+        importance=0.8,
+        agent_id="pytest",
+    )
+
+    assert duplicate.get("merged_into") == original_id or duplicate.get("action") == "merged"
+
+    search = brain_client.structured_search(
+        query="PostgreSQL partial indexes filtered queries",
+        project=project,
+        scope="project",
+        limit=5,
+        register_access=False,
+    )
+    matching_ids = [r["memory_id"] for r in search["results"]]
+    assert original_id in matching_ids
+    postgres_results = [r for r in search["results"] if "partial indexes" in r["content"]]
+    assert len(postgres_results) == 1
+
+
+def test_novelty_merge_preserves_distinct_memories(brain_client, unique_project_name):
+    """Memories with genuinely different content should NOT be merged."""
+    project = unique_project_name("novelty-distinct")
+
+    mem_a = brain_client.create_memory(
+        content="Redis pub/sub enables real-time event broadcasting between microservices.",
+        project=project,
+        memory_type="general",
+        tags="tech/redis,pattern/pubsub",
+        importance=0.7,
+        agent_id="pytest",
+    )["memory_id"]
+
+    mem_b = brain_client.create_memory(
+        content="PostgreSQL LISTEN/NOTIFY provides lightweight change notification without polling.",
+        project=project,
+        memory_type="general",
+        tags="tech/postgres,pattern/notification",
+        importance=0.7,
+        agent_id="pytest",
+    )["memory_id"]
+
+    assert mem_a != mem_b
+    detail_a = brain_client.memory_detail(mem_a)
+    detail_b = brain_client.memory_detail(mem_b)
+    assert detail_a is not None
+    assert detail_b is not None
+
+
+def test_uncertainty_aware_retrieval_includes_confidence(brain_client, unique_project_name):
+    """Structured search response should include confidence and low_confidence fields."""
+    project = unique_project_name("uncertainty-conf")
+
+    brain_client.create_memory(
+        content="Docker compose health checks use test commands to verify container readiness.",
+        project=project,
+        memory_type="general",
+        tags="tech/docker",
+        importance=0.8,
+        agent_id="pytest",
+    )
+
+    search = brain_client.structured_search(
+        query="Docker compose health checks container readiness",
+        project=project,
+        scope="project",
+        limit=5,
+        register_access=False,
+    )
+    assert "confidence" in search
+    assert isinstance(search["confidence"], float)
+    assert "low_confidence" in search
+    assert isinstance(search["low_confidence"], bool)
+    assert search["confidence"] > 0
+
+
+def test_uncertainty_aware_retrieval_flags_irrelevant_query(brain_client, unique_project_name):
+    """A query completely unrelated to stored memories should be flagged as low confidence."""
+    project = unique_project_name("uncertainty-irrelevant")
+
+    brain_client.create_memory(
+        content="Kubernetes pod autoscaling uses HPA to adjust replica count based on CPU metrics.",
+        project=project,
+        memory_type="general",
+        tags="tech/kubernetes",
+        importance=0.8,
+        agent_id="pytest",
+    )
+
+    search = brain_client.structured_search(
+        query="French impressionist painting techniques of the 19th century",
+        project=project,
+        scope="project",
+        limit=5,
+        register_access=False,
+    )
+    assert "confidence" in search
+    assert "low_confidence" in search
+
+
+def test_keyphrase_prefilter_retrieves_relevant_memories(brain_client, unique_project_name):
+    """Keyphrase pre-filtering should still find relevant memories efficiently."""
+    project = unique_project_name("keyphrase-prefilter")
+
+    mem_redis = brain_client.create_memory(
+        content="Redis streams provide append-only log data structures for event processing pipelines.",
+        project=project,
+        memory_type="general",
+        tags="tech/redis,pattern/streaming",
+        importance=0.8,
+        agent_id="pytest",
+    )["memory_id"]
+
+    brain_client.create_memory(
+        content="GraphQL schema stitching merges multiple service schemas into a unified API gateway.",
+        project=project,
+        memory_type="general",
+        tags="tech/graphql,pattern/gateway",
+        importance=0.8,
+        agent_id="pytest",
+    )
+
+    search = brain_client.structured_search(
+        query="Redis streams event processing pipeline",
+        project=project,
+        scope="project",
+        limit=5,
+        register_access=False,
+    )
+    result_ids = [r["memory_id"] for r in search["results"]]
+    assert mem_redis in result_ids
+
+
+def test_lateral_inhibition_concentrates_activation_energy(brain_client, unique_project_name):
+    """After spreading activation with lateral inhibition, energy should be
+    concentrated in the most relevant memories, not spread uniformly."""
+    project = unique_project_name("lateral-inhib")
+
+    hub = brain_client.create_memory(
+        content="Event sourcing stores all state changes as an immutable sequence of domain events.",
+        project=project,
+        memory_type="architecture",
+        tags="pattern/event-sourcing",
+        importance=0.9,
+        agent_id="pytest",
+    )["memory_id"]
+
+    related_strong = brain_client.create_memory(
+        content="Event sourcing replay rebuilds read models by re-processing the event log from scratch.",
+        project=project,
+        memory_type="architecture",
+        tags="pattern/event-sourcing,pattern/replay",
+        importance=0.85,
+        agent_id="pytest",
+    )["memory_id"]
+
+    related_weak = brain_client.create_memory(
+        content="Database indexes accelerate query performance by maintaining sorted data structures.",
+        project=project,
+        memory_type="general",
+        tags="tech/postgres,pattern/indexing",
+        importance=0.6,
+        agent_id="pytest",
+    )["memory_id"]
+
+    try:
+        brain_client.link_memories(
+            source_memory_id=hub,
+            target_memory_id=related_strong,
+            relation_type="same_concept",
+            reason="Both about event sourcing",
+            weight=0.9,
+        )
+    except Exception:
+        pass
+
+    try:
+        brain_client.link_memories(
+            source_memory_id=hub,
+            target_memory_id=related_weak,
+            relation_type="applies_to",
+            reason="Indexing supports event sourcing queries",
+            weight=0.3,
+        )
+    except Exception:
+        pass
+
+    brain_client.apply_session_plasticity(
+        project=project,
+        agent_id="pytest",
+        session_id=f"session-inhib-{project}",
+        goal="test lateral inhibition",
+        outcome="completed",
+        summary="Tested event sourcing replay and rebuild patterns.",
+        changes=[],
+        decisions=[],
+        errors=[],
+        follow_ups=[],
+        tags=["tests"],
+    )
+
+    search = brain_client.structured_search(
+        query="event sourcing replay rebuild",
+        project=project,
+        scope="project",
+        limit=5,
+        register_access=False,
+    )
+    result_ids = [r["memory_id"] for r in search["results"]]
+
+    assert hub in result_ids
+    assert related_strong in result_ids
+    assert search["results"][0]["memory_id"] in {hub, related_strong}

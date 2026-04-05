@@ -29,6 +29,7 @@ from qdrant_client.models import (
     Filter,
     Fusion,
     FusionQuery,
+    HasIdCondition,
     MatchValue,
     PayloadSchemaType,
     PointStruct,
@@ -97,6 +98,8 @@ AUTO_LINK_CANDIDATE_LIMIT = 6
 AUTO_LINK_SCORE_THRESHOLD = 0.78
 ACTIVATION_PROPAGATION_TTL = 900          # 15 min en Redis
 ACTIVATION_PROPAGATION_DECAY = 0.4        # factor de decaimiento por salto
+NOVELTY_MERGE_THRESHOLD = 0.15            # novelty below this triggers merge instead of new memory
+CONFIDENCE_THRESHOLD = 1.5               # max/mean ratio below this flags low confidence
 DEEP_SLEEP_INTERVAL = int(os.environ.get("DEEP_SLEEP_INTERVAL_SECONDS", "86400"))  # 24h
 PG_POOL_MAX_SIZE = int(os.environ.get("PG_POOL_MAX_SIZE", "8"))
 PG_POOL_MIN_SIZE = int(os.environ.get("PG_POOL_MIN_SIZE", "1"))
@@ -1296,6 +1299,32 @@ async def propagate_activation(memory_id: str, depth: int = 2, decay_factor: flo
                     next_frontier.append((neighbor, propagated_energy))
                     propagated_count += 1
             frontier = next_frontier
+
+    # --- Lateral Inhibition (winner-take-all) ---
+    # After propagation, suppress weakly activated memories so only the
+    # strongest survive. Inspired by SYNAPSE (arXiv:2601.02744).
+    if len(visited) > 1:
+        energies = [e for mid, e in visited.items() if mid != memory_id]
+        if energies:
+            mean_energy = sum(energies) / len(energies)
+            std_energy = (sum((e - mean_energy) ** 2 for e in energies) / len(energies)) ** 0.5
+            threshold = mean_energy + std_energy
+            INHIBITION_FACTOR = 0.3
+
+            inhibited: dict[str, float] = {memory_id: visited[memory_id]}
+            for mid, energy in visited.items():
+                if mid == memory_id:
+                    continue
+                # Lateral inhibition: subtract mean of others scaled by factor
+                suppressed = energy - INHIBITION_FACTOR * mean_energy
+                # Sigmoid gate: sharp cutoff around threshold
+                if suppressed > 0:
+                    steepness = 10.0
+                    gated = 1.0 / (1.0 + math.exp(-(suppressed - threshold) * steepness))
+                    if gated > 0.05:
+                        inhibited[mid] = round(gated, 4)
+            visited = inhibited
+
     # Escribir activación propagada en Redis con TTL
     try:
         pipeline = redis_client.pipeline()
@@ -1437,6 +1466,37 @@ async def structured_search_memories(
     allowed_projects = set(await resolve_scope_projects(project, normalized_scope))
     exclude_ids = {str(memory_id) for memory_id in (exclude_memory_ids or [])}
     query_embedding = await get_embedding(query)
+
+    # SDR Pre-filter: narrow candidates via keyphrase overlap in Postgres
+    prefilter_ids: list[str] | None = None
+    if pg_pool and project:
+        try:
+            query_keyphrases = extract_keyphrases(query, normalize_tags(tags))
+            if query_keyphrases:
+                prefilter_raw_limit = max(limit * 6, 24)
+                async with pg_pool.acquire() as conn:
+                    rows = await conn.fetch(
+                        """
+                        SELECT ml.id::text
+                        FROM memory_log ml
+                        JOIN projects p ON p.id = ml.project_id
+                        WHERE p.name = $1
+                          AND ml.keyphrases && $2::text[]
+                        ORDER BY array_length(
+                            ARRAY(SELECT unnest(ml.keyphrases) INTERSECT SELECT unnest($2::text[])),
+                            1
+                        ) DESC NULLS LAST
+                        LIMIT $3
+                        """,
+                        project,
+                        query_keyphrases,
+                        prefilter_raw_limit,
+                    )
+                    if len(rows) >= limit:
+                        prefilter_ids = [str(row["id"]) for row in rows]
+        except Exception as exc:
+            logger.debug("Keyphrase pre-filter failed, using full search: %s", exc)
+
     conditions: list[FieldCondition] = []
     project_conditions: list[FieldCondition] = []
     if project and normalized_scope == "project":
@@ -1455,6 +1515,16 @@ async def structured_search_memories(
     raw_limit = max(limit * 6, 24)
     if project_conditions:
         raw_limit = max(raw_limit, limit * max(6, len(project_conditions) * 3))
+
+    # Apply keyphrase pre-filter to Qdrant query
+    if prefilter_ids is not None:
+        has_id_condition = HasIdCondition(has_id=prefilter_ids)
+        if query_filter is None:
+            query_filter = Filter(must=[has_id_condition])
+        else:
+            existing_must = list(query_filter.must or [])
+            existing_must.append(has_id_condition)
+            query_filter = Filter(must=existing_must, should=query_filter.should)
     # [L0] Fusion search: dual-vector with RRF, fallback to single-vector
     try:
         response = await qdrant.query_points(
@@ -3007,6 +3077,7 @@ async def store_memory(
 
     Devuelve:
     - `OK ...` si la memoria se guardó.
+    - `MERGED ...` si se encontró una memoria casi idéntica y se reforzó la existente.
     - `SKIP ...` si se omitió por alta similitud con otra memoria existente.
     - `ERROR ...` si ocurrió un fallo.
     """
@@ -3023,6 +3094,52 @@ async def store_memory(
                 )
 
         embedding = await get_embedding(content)
+
+        # Check for near-duplicate to merge into (novelty-based dedup)
+        merge_target = None
+        try:
+            merge_candidates = await qdrant.query_points(
+                collection_name=COLLECTION_NAME,
+                query=embedding,
+                using="content",
+                query_filter=Filter(must=[
+                    FieldCondition(key="project_id", match=MatchValue(value=project)),
+                    FieldCondition(key="memory_type", match=MatchValue(value=memory_type)),
+                ]),
+                limit=1,
+                with_payload=True,
+                score_threshold=0.85,
+            )
+            if merge_candidates.points:
+                top = merge_candidates.points[0]
+                novelty = round(1.0 - float(top.score), 3)
+                if novelty < NOVELTY_MERGE_THRESHOLD:
+                    merge_target = top
+        except Exception:
+            logger.debug("Novelty merge check failed, proceeding with normal store")
+
+        if merge_target is not None:
+            existing_id = str(merge_target.id)
+            existing_payload = merge_target.payload or {}
+            existing_importance = float(existing_payload.get("importance", 0.5))
+            merged_importance = round(min(1.0, max(existing_importance, importance) + 0.05), 3)
+            await qdrant.set_payload(
+                collection_name=COLLECTION_NAME,
+                payload={"importance": merged_importance},
+                points=[existing_id],
+            )
+            if pg_pool:
+                async with pg_pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE memory_log SET importance = $1 WHERE id = $2",
+                        merged_importance, uuid.UUID(existing_id),
+                    )
+            logger.info(
+                "Novelty merge: new memory merged into %s (novelty=%.3f, importance %.2f→%.2f)",
+                existing_id, 1.0 - float(merge_target.score), existing_importance, merged_importance,
+            )
+            return f"MERGED into={existing_id} project={project} type={memory_type} novelty={1.0 - float(merge_target.score):.3f}"
+
         # [L0] Extract keyphrases and compute domain embedding
         keyphrases = extract_keyphrases(content, tags_list)
         domain_text = " ".join(keyphrases) if keyphrases else content
@@ -3751,6 +3868,13 @@ async def create_memory(payload: MemoryCreateRequest):
     if result.startswith("ERROR"):
         raise HTTPException(status_code=500, detail=result)
     fields = parse_result_fields(result)
+    if result.startswith("MERGED"):
+        return {
+            "result": result,
+            "action": "merged",
+            "merged_into": fields.get("into", ""),
+            "memory_id": fields.get("into", ""),
+        }
     return {"result": result, "memory_id": fields.get("memory_id")}
 
 
@@ -3788,11 +3912,22 @@ async def api_search_memory_structured(payload: StructuredSearchRequest):
         )
         if payload.register_access:
             await register_memory_access(results)
+        # Uncertainty-aware confidence scoring
+        if results:
+            scores = [item["hybrid_score"] for item in results]
+            max_score = max(scores)
+            mean_score = sum(scores) / len(scores)
+            confidence = round(max_score / max(mean_score, 0.001), 4)
+        else:
+            confidence = 0.0
+        low_confidence = confidence < CONFIDENCE_THRESHOLD
         return {
             "query": payload.query,
             "scope": payload.scope,
             "project": payload.project,
             "count": len(results),
+            "confidence": confidence,
+            "low_confidence": low_confidence,
             "results": [
                 {
                     "memory_id": item["id"],
