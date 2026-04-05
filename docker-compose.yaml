@@ -27,9 +27,11 @@ services:
       - backend
     ports:
       - "127.0.0.1:5434:5432"
+    entrypoint: ["/scripts/postgres-entrypoint.sh"]
     volumes:
       - ${AI_MEMORY_POSTGRES_VOLUME:-./volumes/postgres}:/var/lib/postgresql/data
       - ./config/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./scripts/postgres-entrypoint.sh:/scripts/postgres-entrypoint.sh:ro
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -52,6 +54,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+      start_period: 30s
 
   redis:
     image: redis:8-alpine
@@ -218,7 +221,7 @@ services:
       - "3080:80"
     depends_on:
       api-server:
-        condition: service_healthy
+        condition: service_started
 
 networks:
   backend:
