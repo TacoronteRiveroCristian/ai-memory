@@ -430,3 +430,37 @@ def test_uncertainty_aware_retrieval_flags_irrelevant_query(brain_client, unique
     )
     assert "confidence" in search
     assert "low_confidence" in search
+
+
+def test_keyphrase_prefilter_retrieves_relevant_memories(brain_client, unique_project_name):
+    """Keyphrase pre-filtering should still find relevant memories efficiently."""
+    project = unique_project_name("keyphrase-prefilter")
+
+    mem_redis = brain_client.create_memory(
+        content="Redis streams provide append-only log data structures for event processing pipelines.",
+        project=project,
+        memory_type="general",
+        tags="tech/redis,pattern/streaming",
+        importance=0.8,
+        agent_id="pytest",
+    )["memory_id"]
+
+    brain_client.create_memory(
+        content="GraphQL schema stitching merges multiple service schemas into a unified API gateway.",
+        project=project,
+        memory_type="general",
+        tags="tech/graphql,pattern/gateway",
+        importance=0.8,
+        agent_id="pytest",
+    )
+
+    search = brain_client.structured_search(
+        query="Redis streams event processing pipeline",
+        project=project,
+        scope="project",
+        limit=5,
+        register_access=False,
+    )
+    result_ids = [r["memory_id"] for r in search["results"]]
+    assert mem_redis in result_ids
+    assert search["results"][0]["memory_id"] == mem_redis

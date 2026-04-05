@@ -29,6 +29,7 @@ from qdrant_client.models import (
     Filter,
     Fusion,
     FusionQuery,
+    HasIdCondition,
     MatchValue,
     PayloadSchemaType,
     PointStruct,
@@ -1439,6 +1440,37 @@ async def structured_search_memories(
     allowed_projects = set(await resolve_scope_projects(project, normalized_scope))
     exclude_ids = {str(memory_id) for memory_id in (exclude_memory_ids or [])}
     query_embedding = await get_embedding(query)
+
+    # SDR Pre-filter: narrow candidates via keyphrase overlap in Postgres
+    prefilter_ids: list[str] | None = None
+    if pg_pool and project:
+        try:
+            query_keyphrases = extract_keyphrases(query, normalize_tags(tags))
+            if query_keyphrases:
+                prefilter_raw_limit = max(limit * 6, 24)
+                async with pg_pool.acquire() as conn:
+                    rows = await conn.fetch(
+                        """
+                        SELECT ml.id::text
+                        FROM memory_log ml
+                        JOIN projects p ON p.id = ml.project_id
+                        WHERE p.name = $1
+                          AND ml.keyphrases && $2::text[]
+                        ORDER BY array_length(
+                            ARRAY(SELECT unnest(ml.keyphrases) INTERSECT SELECT unnest($2::text[])),
+                            1
+                        ) DESC NULLS LAST
+                        LIMIT $3
+                        """,
+                        project,
+                        query_keyphrases,
+                        prefilter_raw_limit,
+                    )
+                    if len(rows) >= limit:
+                        prefilter_ids = [str(row["id"]) for row in rows]
+        except Exception as exc:
+            logger.debug("Keyphrase pre-filter failed, using full search: %s", exc)
+
     conditions: list[FieldCondition] = []
     project_conditions: list[FieldCondition] = []
     if project and normalized_scope == "project":
@@ -1457,6 +1489,16 @@ async def structured_search_memories(
     raw_limit = max(limit * 6, 24)
     if project_conditions:
         raw_limit = max(raw_limit, limit * max(6, len(project_conditions) * 3))
+
+    # Apply keyphrase pre-filter to Qdrant query
+    if prefilter_ids is not None:
+        has_id_condition = HasIdCondition(has_id=prefilter_ids)
+        if query_filter is None:
+            query_filter = Filter(must=[has_id_condition])
+        else:
+            existing_must = list(query_filter.must or [])
+            existing_must.append(has_id_condition)
+            query_filter = Filter(must=existing_must, should=query_filter.should)
     # [L0] Fusion search: dual-vector with RRF, fallback to single-vector
     try:
         response = await qdrant.query_points(
