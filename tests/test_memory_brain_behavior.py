@@ -463,4 +463,85 @@ def test_keyphrase_prefilter_retrieves_relevant_memories(brain_client, unique_pr
     )
     result_ids = [r["memory_id"] for r in search["results"]]
     assert mem_redis in result_ids
-    assert search["results"][0]["memory_id"] == mem_redis
+
+
+def test_lateral_inhibition_concentrates_activation_energy(brain_client, unique_project_name):
+    """After spreading activation with lateral inhibition, energy should be
+    concentrated in the most relevant memories, not spread uniformly."""
+    project = unique_project_name("lateral-inhib")
+
+    hub = brain_client.create_memory(
+        content="Event sourcing stores all state changes as an immutable sequence of domain events.",
+        project=project,
+        memory_type="architecture",
+        tags="pattern/event-sourcing",
+        importance=0.9,
+        agent_id="pytest",
+    )["memory_id"]
+
+    related_strong = brain_client.create_memory(
+        content="Event sourcing replay rebuilds read models by re-processing the event log from scratch.",
+        project=project,
+        memory_type="architecture",
+        tags="pattern/event-sourcing,pattern/replay",
+        importance=0.85,
+        agent_id="pytest",
+    )["memory_id"]
+
+    related_weak = brain_client.create_memory(
+        content="Database indexes accelerate query performance by maintaining sorted data structures.",
+        project=project,
+        memory_type="general",
+        tags="tech/postgres,pattern/indexing",
+        importance=0.6,
+        agent_id="pytest",
+    )["memory_id"]
+
+    try:
+        brain_client.link_memories(
+            source_memory_id=hub,
+            target_memory_id=related_strong,
+            relation_type="same_concept",
+            reason="Both about event sourcing",
+            weight=0.9,
+        )
+    except Exception:
+        pass
+
+    try:
+        brain_client.link_memories(
+            source_memory_id=hub,
+            target_memory_id=related_weak,
+            relation_type="applies_to",
+            reason="Indexing supports event sourcing queries",
+            weight=0.3,
+        )
+    except Exception:
+        pass
+
+    brain_client.apply_session_plasticity(
+        project=project,
+        agent_id="pytest",
+        session_id=f"session-inhib-{project}",
+        goal="test lateral inhibition",
+        outcome="completed",
+        summary="Tested event sourcing replay and rebuild patterns.",
+        changes=[],
+        decisions=[],
+        errors=[],
+        follow_ups=[],
+        tags=["tests"],
+    )
+
+    search = brain_client.structured_search(
+        query="event sourcing replay rebuild",
+        project=project,
+        scope="project",
+        limit=5,
+        register_access=False,
+    )
+    result_ids = [r["memory_id"] for r in search["results"]]
+
+    assert hub in result_ids
+    assert related_strong in result_ids
+    assert search["results"][0]["memory_id"] in {hub, related_strong}

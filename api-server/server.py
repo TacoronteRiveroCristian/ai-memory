@@ -1299,6 +1299,32 @@ async def propagate_activation(memory_id: str, depth: int = 2, decay_factor: flo
                     next_frontier.append((neighbor, propagated_energy))
                     propagated_count += 1
             frontier = next_frontier
+
+    # --- Lateral Inhibition (winner-take-all) ---
+    # After propagation, suppress weakly activated memories so only the
+    # strongest survive. Inspired by SYNAPSE (arXiv:2601.02744).
+    if len(visited) > 1:
+        energies = [e for mid, e in visited.items() if mid != memory_id]
+        if energies:
+            mean_energy = sum(energies) / len(energies)
+            std_energy = (sum((e - mean_energy) ** 2 for e in energies) / len(energies)) ** 0.5
+            threshold = mean_energy + std_energy
+            INHIBITION_FACTOR = 0.3
+
+            inhibited: dict[str, float] = {memory_id: visited[memory_id]}
+            for mid, energy in visited.items():
+                if mid == memory_id:
+                    continue
+                # Lateral inhibition: subtract mean of others scaled by factor
+                suppressed = energy - INHIBITION_FACTOR * mean_energy
+                # Sigmoid gate: sharp cutoff around threshold
+                if suppressed > 0:
+                    steepness = 10.0
+                    gated = 1.0 / (1.0 + math.exp(-(suppressed - threshold) * steepness))
+                    if gated > 0.05:
+                        inhibited[mid] = round(gated, 4)
+            visited = inhibited
+
     # Escribir activación propagada en Redis con TTL
     try:
         pipeline = redis_client.pipeline()
