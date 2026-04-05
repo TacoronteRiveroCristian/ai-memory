@@ -98,6 +98,7 @@ AUTO_LINK_SCORE_THRESHOLD = 0.78
 ACTIVATION_PROPAGATION_TTL = 900          # 15 min en Redis
 ACTIVATION_PROPAGATION_DECAY = 0.4        # factor de decaimiento por salto
 NOVELTY_MERGE_THRESHOLD = 0.15            # novelty below this triggers merge instead of new memory
+CONFIDENCE_THRESHOLD = 1.5               # max/mean ratio below this flags low confidence
 DEEP_SLEEP_INTERVAL = int(os.environ.get("DEEP_SLEEP_INTERVAL_SECONDS", "86400"))  # 24h
 PG_POOL_MAX_SIZE = int(os.environ.get("PG_POOL_MAX_SIZE", "8"))
 PG_POOL_MIN_SIZE = int(os.environ.get("PG_POOL_MIN_SIZE", "1"))
@@ -3843,11 +3844,22 @@ async def api_search_memory_structured(payload: StructuredSearchRequest):
         )
         if payload.register_access:
             await register_memory_access(results)
+        # Uncertainty-aware confidence scoring
+        if results:
+            scores = [item["hybrid_score"] for item in results]
+            max_score = max(scores)
+            mean_score = sum(scores) / len(scores)
+            confidence = round(max_score / max(mean_score, 0.001), 4)
+        else:
+            confidence = 0.0
+        low_confidence = confidence < CONFIDENCE_THRESHOLD
         return {
             "query": payload.query,
             "scope": payload.scope,
             "project": payload.project,
             "count": len(results),
+            "confidence": confidence,
+            "low_confidence": low_confidence,
             "results": [
                 {
                     "memory_id": item["id"],

@@ -379,3 +379,54 @@ def test_novelty_merge_preserves_distinct_memories(brain_client, unique_project_
     detail_b = brain_client.memory_detail(mem_b)
     assert detail_a is not None
     assert detail_b is not None
+
+
+def test_uncertainty_aware_retrieval_includes_confidence(brain_client, unique_project_name):
+    """Structured search response should include confidence and low_confidence fields."""
+    project = unique_project_name("uncertainty-conf")
+
+    brain_client.create_memory(
+        content="Docker compose health checks use test commands to verify container readiness.",
+        project=project,
+        memory_type="general",
+        tags="tech/docker",
+        importance=0.8,
+        agent_id="pytest",
+    )
+
+    search = brain_client.structured_search(
+        query="Docker compose health checks container readiness",
+        project=project,
+        scope="project",
+        limit=5,
+        register_access=False,
+    )
+    assert "confidence" in search
+    assert isinstance(search["confidence"], float)
+    assert "low_confidence" in search
+    assert isinstance(search["low_confidence"], bool)
+    assert search["confidence"] > 0
+
+
+def test_uncertainty_aware_retrieval_flags_irrelevant_query(brain_client, unique_project_name):
+    """A query completely unrelated to stored memories should be flagged as low confidence."""
+    project = unique_project_name("uncertainty-irrelevant")
+
+    brain_client.create_memory(
+        content="Kubernetes pod autoscaling uses HPA to adjust replica count based on CPU metrics.",
+        project=project,
+        memory_type="general",
+        tags="tech/kubernetes",
+        importance=0.8,
+        agent_id="pytest",
+    )
+
+    search = brain_client.structured_search(
+        query="French impressionist painting techniques of the 19th century",
+        project=project,
+        scope="project",
+        limit=5,
+        register_access=False,
+    )
+    assert "confidence" in search
+    assert "low_confidence" in search
