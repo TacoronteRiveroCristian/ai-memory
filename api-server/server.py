@@ -17,7 +17,7 @@ import redis.asyncio as aioredis
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from openai import AsyncOpenAI
@@ -139,6 +139,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.get("/.well-known/oauth-authorization-server")
+@app.get("/mcp/.well-known/oauth-authorization-server")
+async def _oauth_not_supported():
+    """Return proper 404 for OAuth discovery so MCP clients fall through to no-auth."""
+    return Response(status_code=404)
 
 
 @app.exception_handler(Exception)

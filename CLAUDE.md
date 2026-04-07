@@ -94,6 +94,32 @@ These terms appear throughout the codebase:
 - **Novelty score**: how novel a memory is relative to existing knowledge
 - **Schema extraction**: abstract patterns detected across multiple concrete memories
 
+## Serena MCP — Semantic Code Tools
+
+This project has the **Serena MCP server** connected, which provides semantic understanding of the codebase (Python, TypeScript). Use it as the primary way to navigate and edit code.
+
+### When to use Serena vs native tools
+
+| Task | Use | Why |
+|------|-----|-----|
+| Find where a class/function is defined | `find_symbol` | Understands language structure, no false positives |
+| Understand a file's API surface | `get_symbols_overview` | Shows classes, methods, signatures without reading entire file |
+| Find all callers of a function | `find_referencing_symbols` | Follows real references, not string matches |
+| Rename a variable/function/class | `rename_symbol` | Language-aware — updates all references correctly |
+| Replace a function body | `replace_symbol_body` | Respects indentation and scope boundaries |
+| Insert code before/after a symbol | `insert_before_symbol` / `insert_after_symbol` | Positions code correctly within the file structure |
+| Delete unused code | `safe_delete_symbol` | Verifies no references before deleting |
+| Read a full file or make a 1-line edit | Native `Read` / `Edit` | Simpler, no overhead needed |
+| Search for a string pattern (logs, URLs, config keys) | Native `Grep` or `search_for_pattern` | Text search, not semantic |
+| Find files by name/glob | Native `Glob` or `find_file` | File-level, not code-level |
+
+### Workflow principles
+
+1. **Navigate before reading**: Use `get_symbols_overview` → `find_symbol` to locate what you need, then read only the relevant symbol body. Avoid reading entire files unless necessary.
+2. **Edit symbolically for refactors**: For any change touching multiple locations (renames, signature changes, moving code), use Serena's symbolic editing tools — they understand scope and won't break indentation.
+3. **Fall back to native tools for simple ops**: Single-line fixes, config changes, reading small files — use `Read`/`Edit`/`Grep` directly. Don't over-engineer simple tasks.
+4. **Run onboarding once per session**: Call `check_onboarding_performed` at session start if you plan heavy code navigation — it indexes the project for faster symbol resolution.
+
 ## Performance Targets (CI-enforced)
 
 | Endpoint | P95 Threshold |
