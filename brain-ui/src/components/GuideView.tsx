@@ -37,14 +37,23 @@ export default function GuideView() {
     const allIds = [...GRAPH_SECTIONS, ...HEALTH_SECTIONS].map((s) => s.id);
 
     const onScroll = () => {
-      for (let i = allIds.length - 1; i >= 0; i--) {
-        const el = container.querySelector(`#${allIds[i]}`);
-        if (el && (el as HTMLElement).getBoundingClientRect().top <= 80) {
-          setActiveId(allIds[i]);
-          return;
+      const containerTop = container.getBoundingClientRect().top;
+      const remainingScroll = Math.max(
+        0,
+        container.scrollHeight - container.scrollTop - container.clientHeight,
+      );
+      // Expand detection zone near bottom so last sections can activate
+      const threshold =
+        80 + Math.max(0, container.clientHeight / 2 - remainingScroll);
+
+      let active = allIds[0];
+      for (const id of allIds) {
+        const el = container.querySelector(`#${id}`) as HTMLElement | null;
+        if (el && el.getBoundingClientRect().top - containerTop <= threshold) {
+          active = id;
         }
       }
-      setActiveId(allIds[0]);
+      setActiveId(active);
     };
 
     container.addEventListener("scroll", onScroll, { passive: true });
