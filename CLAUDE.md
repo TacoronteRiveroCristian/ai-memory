@@ -26,6 +26,17 @@ Offline (every 6h) → [reflection-worker]     — consolidation via DeepSeek re
 
 **Test mode**: `AI_MEMORY_TEST_MODE=true` enables deterministic behavior — frozen timestamps, stable hash-based embeddings (no OpenAI calls), heuristic reasoning (no DeepSeek calls).
 
+## MCP Setup for Claude Code
+
+The `.mcp.json` uses `${MEMORY_API_KEY}` from the environment. Before starting Claude Code, export it:
+
+```bash
+# Load env vars and start Claude Code
+source .env && claude
+```
+
+If the MCP server shows as disconnected, restart it from the MCP panel after ensuring the variable is exported.
+
 ## Commands
 
 ```bash

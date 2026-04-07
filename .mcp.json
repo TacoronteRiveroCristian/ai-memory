@@ -1,11 +1,11 @@
 {
-  "mcpServers": {
-    "memory-brain": {
-      "type": "http",
-      "url": "http://localhost:8050/mcp/",
-      "headers": {
-        "X-API-Key": "change-me"
-      }
+    "mcpServers": {
+        "memoryBrain": {
+            "type": "http",
+            "url": "http://localhost:8050/mcp",
+            "headers": {
+                "X-API-Key": "${MEMORY_API_KEY}"
+            }
+        }
     }
-  }
 }
