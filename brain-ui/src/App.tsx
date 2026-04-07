@@ -174,7 +174,8 @@ export default function App() {
                 selectedProject={selectedProjects.size === 1 ? [...selectedProjects][0] : null}
                 selectedProjects={selectedProjects}
                 onNodeClick={setSelectedNode}
-                onBackgroundClick={() => setSelectedNode(null)}
+                onBackgroundClick={() => {}}
+                focusNodeId={selectedNode?.memory_id ?? null}
                 externalHoveredNodeId={externalHoveredNodeId}
               />
             )}
@@ -183,7 +184,10 @@ export default function App() {
                 node={selectedNode}
                 edges={edges}
                 graphNodes={nodes}
-                onClose={() => setSelectedNode(null)}
+                onClose={() => {
+                  setSelectedNode(null);
+                  setExternalHoveredNodeId(null);
+                }}
                 onNodeNavigate={handleNodeNavigate}
                 onRelationHover={setExternalHoveredNodeId}
                 onKeyphraseClick={(kp) => handleKeywordChange(kp)}

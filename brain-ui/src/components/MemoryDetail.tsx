@@ -221,13 +221,11 @@ export default function MemoryDetail({
                   <div className={styles.relationPreview}>
                     {targetNode!.content_preview}
                   </div>
-                  {isHovered && (
-                    <div className={styles.relationTooltip}>
-                      <div>Weight: {edge.weight.toFixed(3)}</div>
-                      {edge.myelin_score > 0 && <div>Myelin: {edge.myelin_score.toFixed(3)}</div>}
-                      <div>Reinforced: {edge.reinforcement_count}x</div>
-                    </div>
-                  )}
+                  <div className={`${styles.relationTooltip} ${isHovered ? styles.relationTooltipVisible : ""}`}>
+                    <div>Weight: {edge.weight.toFixed(3)}</div>
+                    {edge.myelin_score > 0 && <div>Myelin: {edge.myelin_score.toFixed(3)}</div>}
+                    <div>Reinforced: {edge.reinforcement_count}x</div>
+                  </div>
                 </div>
               );
             })}

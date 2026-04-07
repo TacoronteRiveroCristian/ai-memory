@@ -325,6 +325,14 @@
   flex-direction: column;
   gap: 2px;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  visibility: hidden;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.relationTooltipVisible {
+  visibility: visible;
+  opacity: 1;
 }
 
 /* Meta footer */

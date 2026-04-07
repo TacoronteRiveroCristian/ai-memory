@@ -69,7 +69,7 @@ cd brain-ui && npm install && npm run dev    # Vite dev server on :5173
 
 # Docker
 docker compose build brain-ui                 # Build production image
-docker compose up -d brain-ui                 # Serve on :3000
+docker compose up -d brain-ui                 # Serve on :3080
 ```
 
 Requires `VITE_API_URL` and `VITE_API_KEY` environment variables. In Docker, these are passed as build args from the root `.env` (`MEMORY_API_KEY`).

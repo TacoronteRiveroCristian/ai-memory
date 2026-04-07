@@ -26,6 +26,7 @@ interface BrainGraphProps {
   selectedProjects: Set<string>;
   onNodeClick: (node: GraphNode) => void;
   onBackgroundClick: () => void;
+  focusNodeId?: string | null;
   externalHoveredNodeId?: string | null;
 }
 
@@ -55,6 +56,7 @@ export default function BrainGraph({
   selectedProjects,
   onNodeClick,
   onBackgroundClick,
+  focusNodeId,
   externalHoveredNodeId,
 }: BrainGraphProps) {
   const graphRef = useRef<any>(undefined);
@@ -63,11 +65,17 @@ export default function BrainGraph({
   const [dimensions, setDimensions] = useState({ width: 800, height: 600 });
   const hoveredNodeIdRef = useRef<string | null>(null);
   const externalHoveredRef = useRef<string | null>(null);
+  const selectedNodeIdRef = useRef<string | null>(null);
 
   // Keep external hover in sync via ref (no re-renders)
   useEffect(() => {
     externalHoveredRef.current = externalHoveredNodeId ?? null;
   }, [externalHoveredNodeId]);
+
+  // Keep selected node in sync via ref (no re-renders)
+  useEffect(() => {
+    selectedNodeIdRef.current = focusNodeId ?? null;
+  }, [focusNodeId]);
 
   // Adjacency map for hover highlight
   const adjacencyMap = useMemo(() => {
@@ -156,6 +164,26 @@ export default function BrainGraph({
       return () => clearTimeout(timer);
     }
   }, [graphNodes.length]);
+
+  // Center graph on focused node, or zoom-to-fit smoothly when deselected
+  const prevFocusNodeId = useRef<string | null>(null);
+  useEffect(() => {
+    const fg = graphRef.current;
+    if (!fg) return;
+
+    if (focusNodeId) {
+      // Navigate to the selected node smoothly
+      const node = graphNodes.find((n) => n.memory_id === focusNodeId);
+      if (node?.x != null && node?.y != null) {
+        fg.centerAt(node.x, node.y, 800);
+      }
+    } else if (prevFocusNodeId.current) {
+      // Was selected, now deselected → smooth zoom back to full brain view
+      fg.zoomToFit(1000, 40);
+    }
+
+    prevFocusNodeId.current = focusNodeId ?? null;
+  }, [focusNodeId, graphNodes]);
 
   // Stable ref for graphNodes — used by custom forces
   const graphNodesRef = useRef(graphNodes);
@@ -272,12 +300,21 @@ export default function BrainGraph({
       const size = getNodeSize(n);
       const opacity = getNodeOpacity(n);
 
-      // Hover highlight via refs (no re-render needed)
+      // Selection has priority over hover for highlighting
+      const selected = selectedNodeIdRef.current;
       const hovered = hoveredNodeIdRef.current ?? externalHoveredRef.current;
+      const activeId = hovered ?? selected;
       let highlighted = true;
-      if (hovered) {
-        highlighted = n.memory_id === hovered ||
-          (adjacencyRef.current.get(hovered)?.has(n.memory_id) ?? false);
+      if (activeId) {
+        const isSelected = selected && (
+          n.memory_id === selected ||
+          (adjacencyRef.current.get(selected)?.has(n.memory_id) ?? false)
+        );
+        const isHovered = hovered && (
+          n.memory_id === hovered ||
+          (adjacencyRef.current.get(hovered)?.has(n.memory_id) ?? false)
+        );
+        highlighted = !!(isSelected || isHovered);
       }
       const effectiveOpacity = highlighted ? opacity : 0.08;
 
@@ -383,9 +420,13 @@ export default function BrainGraph({
       const sourceId = typeof start === "object" ? start.memory_id : "";
       const targetId = typeof end === "object" ? end.memory_id : "";
 
-      // Hover highlight via refs
+      // Selection has priority over hover for edge highlighting
+      const selected = selectedNodeIdRef.current;
       const hovered = hoveredNodeIdRef.current ?? externalHoveredRef.current;
-      const edgeHighlighted = !hovered || sourceId === hovered || targetId === hovered;
+      const activeId = hovered ?? selected;
+      const edgeHighlighted = !activeId ||
+        sourceId === activeId || targetId === activeId ||
+        (selected && (sourceId === selected || targetId === selected));
 
       let color: string;
       if (link.isBridge) {
@@ -429,7 +470,7 @@ export default function BrainGraph({
   const handleNodeClick = useCallback((node: any) => {
     const n = node as ForceNode;
     if (graphRef.current) {
-      graphRef.current.centerAt(n.x, n.y, 600);
+      graphRef.current.centerAt(n.x, n.y, 800);
     }
     onNodeClick(n);
   }, [onNodeClick]);
