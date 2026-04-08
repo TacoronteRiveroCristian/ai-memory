@@ -4,7 +4,7 @@
             "type": "http",
             "url": "http://localhost:8050/mcp",
             "headers": {
-                "X-API-Key": "${MEMORY_API_KEY}"
+                "X-API-Key": "change-me"
             }
         }
     }

@@ -19,3 +19,7 @@ brain-ui/node_modules/
 brain-ui/dist/
 .superpowers/
 .playwright-mcp
+
+# Token Benchmark
+benchmarks/token_benchmark/results/
+benchmarks/token_benchmark/passive_log.jsonl
