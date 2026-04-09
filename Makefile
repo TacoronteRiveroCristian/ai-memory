@@ -5,7 +5,7 @@ DOCKER_COMPOSE ?= docker compose
 TEST_NOW ?= 2030-01-01T00:00:00+00:00
 KEEP_STACK_UP ?= false
 
-.PHONY: dev-deps health smoke stack-up stack-down stack-test-up test-deterministic eval-deterministic brain-check demo-up demo-seed demo-check demo-down
+.PHONY: dev-deps health smoke stack-up stack-down stack-test-up test-deterministic eval-deterministic brain-check demo-up demo-seed demo-check demo-down effectiveness
 
 dev-deps:
 	$(PYTHON) -m pip install -r requirements-dev.txt
@@ -46,3 +46,6 @@ demo-check:
 
 demo-down:
 	./scripts/demo_compose.sh down --remove-orphans
+
+effectiveness:
+	AI_MEMORY_BASE_URL=http://127.0.0.1:8050 $(PYTHON) scripts/measure_effectiveness.py $(ARGS)
