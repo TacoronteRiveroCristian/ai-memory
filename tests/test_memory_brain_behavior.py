@@ -592,4 +592,3 @@ def test_delete_project_removes_all_data(brain_client, unique_project_name):
 def test_delete_nonexistent_project_returns_404(brain_client):
     resp = brain_client.delete_project_raw("nonexistent-project-xyz-999")
     assert resp.status_code == 404
-    assert search["results"][0]["memory_id"] in {hub, related_strong}
