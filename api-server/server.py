@@ -827,6 +827,49 @@ async def ensure_project(project_name: str) -> Optional[uuid.UUID]:
         )
 
 
+async def delete_project_internal(project_name: str) -> dict:
+    """Delete a project and all its data from Postgres, Qdrant, and Redis."""
+    if not pg_pool:
+        raise RuntimeError("Database not available")
+
+    project_id = await get_project_id(project_name)
+    if project_id is None:
+        raise ValueError(f"Project '{project_name}' not found")
+
+    # 1. Collect memory IDs for Qdrant cleanup
+    async with pg_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id FROM memory_log WHERE project_id = $1", project_id
+        )
+    memory_ids = [str(row["id"]) for row in rows]
+
+    # 2. Delete vectors from Qdrant
+    if memory_ids:
+        await qdrant.delete(
+            collection_name=COLLECTION_NAME,
+            points_selector=memory_ids,
+        )
+
+    # 3. Delete project from Postgres (CASCADE handles memory_log, relations, bridges, permeability)
+    async with pg_pool.acquire() as conn:
+        await conn.execute("DELETE FROM projects WHERE id = $1", project_id)
+
+    # 4. Invalidate Redis activation keys for deleted memories
+    if redis_client and memory_ids:
+        try:
+            pipe = redis_client.pipeline()
+            for mid in memory_ids:
+                pipe.delete(f"activation_propagation:{mid}")
+            await pipe.execute()
+        except Exception as exc:
+            logger.debug("Redis cleanup for project %s: %s", project_name, exc)
+
+    logger.info(
+        "Proyecto '%s' eliminado: %d memorias borradas", project_name, len(memory_ids)
+    )
+    return {"result": "OK", "project": project_name, "memories_deleted": len(memory_ids)}
+
+
 async def retry_async(label: str, callback, attempts: int = 20, delay: float = 2.0):
     last_error = None
     for attempt in range(1, attempts + 1):
@@ -4056,6 +4099,17 @@ async def api_bridge_projects(payload: BridgeProjectsRequest):
     except Exception as exc:
         logger.exception("api_bridge_projects fallo")
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.delete("/api/projects/{name}")
+async def api_delete_project(name: str):
+    try:
+        return await delete_project_internal(name)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        logger.exception("api_delete_project fallo")
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @app.get("/api/project-bridges")
