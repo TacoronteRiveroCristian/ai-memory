@@ -850,11 +850,15 @@ async def delete_project_internal(project_name: str) -> dict:
             points_selector=memory_ids,
         )
 
-    # 3. Delete project from Postgres (CASCADE handles memory_log, relations, bridges, permeability)
+    # 3. Delete memories explicitly (project_id FK is SET NULL, not CASCADE)
+    async with pg_pool.acquire() as conn:
+        await conn.execute("DELETE FROM memory_log WHERE project_id = $1", project_id)
+
+    # 4. Delete project from Postgres (CASCADE handles bridges, permeability, etc.)
     async with pg_pool.acquire() as conn:
         await conn.execute("DELETE FROM projects WHERE id = $1", project_id)
 
-    # 4. Invalidate Redis activation keys for deleted memories
+    # 5. Invalidate Redis activation keys for deleted memories
     if redis_client and memory_ids:
         try:
             pipe = redis_client.pipeline()
