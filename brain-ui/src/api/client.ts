@@ -62,3 +62,15 @@ export async function fetchBrainHealth(): Promise<BrainHealthResponse> {
   if (!res.ok) throw new Error(`brain health failed: ${res.status}`);
   return res.json();
 }
+
+export async function deleteProject(name: string): Promise<{ result: string; project: string; memories_deleted: number }> {
+  const res = await fetch(`${API_URL}/api/projects/${encodeURIComponent(name)}`, {
+    method: "DELETE",
+    headers,
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ detail: `Delete failed: ${res.status}` }));
+    throw new Error(body.detail || `Delete failed: ${res.status}`);
+  }
+  return res.json();
+}
