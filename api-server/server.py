@@ -3878,6 +3878,32 @@ async def delete_memory(memory_id: str) -> str:
         return f"ERROR {exc}"
 
 
+@mcp.tool()
+async def delete_project(project: str) -> str:
+    """Elimina un proyecto completo y todos sus datos asociados (memorias, relaciones, bridges).
+
+    Cuando usar:
+    - Para limpiar proyectos de prueba, obsoletos o creados por error.
+    - Solo cuando estas seguro de que el proyecto entero debe eliminarse.
+
+    Como usar:
+    - Pasa el nombre exacto del proyecto a eliminar.
+    - Esta operacion es irreversible: borra memorias, vectores, relaciones y bridges.
+
+    Devuelve:
+    - `OK ...` con el conteo de memorias eliminadas.
+    - `ERROR ...` si el proyecto no existe o la operacion falla.
+    """
+    try:
+        result = await delete_project_internal(project)
+        return f"OK deleted project={result['project']} memories_removed={result['memories_deleted']}"
+    except ValueError as exc:
+        return f"ERROR {exc}"
+    except Exception as exc:
+        logger.exception("delete_project fallo")
+        return f"ERROR {exc}"
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok", "timestamp": now_iso(), "test_mode": AI_MEMORY_TEST_MODE}
