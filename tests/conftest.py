@@ -98,6 +98,15 @@ class BrainClient:
     def brain_health(self):
         return self.get("/brain/health")
 
+    def delete_project(self, name: str):
+        response = self._client.delete(f"/api/projects/{name}")
+        response.raise_for_status()
+        return response.json()
+
+    def delete_project_raw(self, name: str):
+        """Return the raw response without raising on error status."""
+        return self._client.delete(f"/api/projects/{name}")
+
     def set_test_clock(self, when: Optional[str]):
         return self.post("/api/test/clock", {"now": when})
 

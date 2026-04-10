@@ -544,4 +544,52 @@ def test_lateral_inhibition_concentrates_activation_energy(brain_client, unique_
 
     assert hub in result_ids
     assert related_strong in result_ids
+
+
+def test_delete_project_removes_all_data(brain_client, unique_project_name):
+    project = unique_project_name("delete-test")
+
+    # Create two memories in the project
+    mem_a = brain_client.create_memory(
+        content="Memory alpha for deletion test project.",
+        project=project,
+        memory_type="general",
+        tags="test/deletion",
+        importance=0.5,
+        agent_id="pytest",
+    )["memory_id"]
+    mem_b = brain_client.create_memory(
+        content="Memory beta for deletion test project.",
+        project=project,
+        memory_type="general",
+        tags="test/deletion",
+        importance=0.5,
+        agent_id="pytest",
+    )["memory_id"]
+
+    # Verify project appears in facets
+    facets = brain_client.graph_facets()
+    project_names = [p["project"] for p in facets["projects"]]
+    assert project in project_names
+
+    # Delete the project
+    result = brain_client.delete_project(project)
+    assert result["result"] == "OK"
+    assert result["project"] == project
+    assert result["memories_deleted"] == 2
+
+    # Verify project no longer appears in facets
+    facets_after = brain_client.graph_facets()
+    project_names_after = [p["project"] for p in facets_after["projects"]]
+    assert project not in project_names_after
+
+    # Verify memories are gone (404)
+    for mid in [mem_a, mem_b]:
+        resp = brain_client._client.get(f"/api/memories/{mid}")
+        assert resp.status_code == 404 or resp.json().get("memory") is None
+
+
+def test_delete_nonexistent_project_returns_404(brain_client):
+    resp = brain_client.delete_project_raw("nonexistent-project-xyz-999")
+    assert resp.status_code == 404
     assert search["results"][0]["memory_id"] in {hub, related_strong}
