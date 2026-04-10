@@ -11,8 +11,9 @@ interface TopBarProps {
   projects: FacetProject[];
   selectedProjects: Set<string>;
   onProjectChange: (projects: Set<string>) => void;
-  keyword: string;
-  onKeywordChange: (keyword: string) => void;
+  keywords: string[];
+  onKeywordsChange: (keywords: string[]) => void;
+  onCenterView: () => void;
   activeTab: TabId;
   onTabChange: (tab: TabId) => void;
   onDeleteRequest?: (project: FacetProject) => void;
@@ -23,8 +24,9 @@ export default function TopBar({
   projects,
   selectedProjects,
   onProjectChange,
-  keyword,
-  onKeywordChange,
+  keywords,
+  onKeywordsChange,
+  onCenterView,
   activeTab,
   onTabChange,
   onDeleteRequest,
@@ -53,7 +55,16 @@ export default function TopBar({
         <TabSwitcher activeTab={activeTab} onTabChange={onTabChange} />
       </div>
       <div className={styles.right}>
-        <KeywordFilter value={keyword} onChange={onKeywordChange} />
+        <KeywordFilter keywords={keywords} onChange={onKeywordsChange} />
+        <button className={styles.centerBtn} onClick={onCenterView} title="Center view">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+            <circle cx="8" cy="8" r="3" />
+            <line x1="8" y1="1" x2="8" y2="4" />
+            <line x1="8" y1="12" x2="8" y2="15" />
+            <line x1="1" y1="8" x2="4" y2="8" />
+            <line x1="12" y1="8" x2="15" y2="8" />
+          </svg>
+        </button>
         <ProjectSelector
           projects={projects}
           selected={selectedProjects}

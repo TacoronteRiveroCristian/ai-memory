@@ -92,6 +92,9 @@ export default function MemoryDetail({
   }
 
   const m = detail.memory;
+  const headerText = m.summary || m.content_preview;
+  const fullContent = m.content || m.content_preview;
+  const showContent = fullContent !== headerText;
 
   return (
     <div className={styles.sidebar}>
@@ -99,7 +102,7 @@ export default function MemoryDetail({
       <div className={styles.header}>
         <div className={styles.colorDot} style={{ background: color }} />
         <div className={styles.headerText}>
-          <div className={styles.title}>{m.summary || m.content_preview}</div>
+          <div className={styles.title}>{headerText}</div>
           <div className={styles.projectLabel}>{m.project}</div>
         </div>
         <button className={styles.closeBtn} onClick={onClose}>{"\u2715"}</button>
@@ -113,8 +116,10 @@ export default function MemoryDetail({
         ))}
       </div>
 
-      {/* Full content */}
-      <div className={styles.content}>{m.content || m.content_preview}</div>
+      {/* Full content (only if different from header) */}
+      {showContent && (
+        <div className={styles.content}>{fullContent}</div>
+      )}
 
       {/* Keyphrases */}
       {m.keyphrases && m.keyphrases.length > 0 && (

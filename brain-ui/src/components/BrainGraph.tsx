@@ -1,4 +1,4 @@
-import { useCallback, useRef, useEffect, useState, useMemo } from "react";
+import { useCallback, useRef, useEffect, useState, useMemo, forwardRef, useImperativeHandle } from "react";
 import ForceGraph2D from "react-force-graph-2d";
 import type { GraphNode, GraphEdge } from "../types";
 import {
@@ -30,6 +30,10 @@ interface BrainGraphProps {
   externalHoveredNodeId?: string | null;
 }
 
+export interface BrainGraphHandle {
+  centerView: () => void;
+}
+
 interface ForceNode extends GraphNode {
   id: string;
   x?: number;
@@ -48,7 +52,7 @@ interface ForceLink {
   evidenceJson?: { tier: number } | null;
 }
 
-export default function BrainGraph({
+const BrainGraph = forwardRef<BrainGraphHandle, BrainGraphProps>(function BrainGraph({
   nodes,
   edges,
   projectList,
@@ -58,7 +62,7 @@ export default function BrainGraph({
   onBackgroundClick,
   focusNodeId,
   externalHoveredNodeId,
-}: BrainGraphProps) {
+}, ref) {
   const graphRef = useRef<any>(undefined);
   const containerRef = useRef<HTMLDivElement>(null);
   const pulsePhase = useRef(0);
@@ -66,6 +70,12 @@ export default function BrainGraph({
   const hoveredNodeIdRef = useRef<string | null>(null);
   const externalHoveredRef = useRef<string | null>(null);
   const selectedNodeIdRef = useRef<string | null>(null);
+
+  useImperativeHandle(ref, () => ({
+    centerView: () => {
+      graphRef.current?.zoomToFit(600, 40);
+    },
+  }));
 
   // Keep external hover in sync via ref (no re-renders)
   useEffect(() => {
@@ -576,4 +586,6 @@ export default function BrainGraph({
       </div>
     </div>
   );
-}
+});
+
+export default BrainGraph;

@@ -28,6 +28,24 @@
   gap: 16px;
 }
 
+.centerBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #1a1a2e;
+  border: 1px solid #2a2a4a;
+  border-radius: 6px;
+  color: #666;
+  cursor: pointer;
+  padding: 5px;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.centerBtn:hover {
+  color: #a78bfa;
+  border-color: #a78bfa;
+}
+
 .health {
   display: flex;
   align-items: center;

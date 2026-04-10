@@ -6,10 +6,10 @@ interface StatsBarProps {
   edges: GraphEdge[];
   totalNodes: number;
   totalEdges: number;
-  keyword: string;
+  filtered: boolean;
 }
 
-export default function StatsBar({ nodes, edges, totalNodes, totalEdges: _totalEdges, keyword }: StatsBarProps) {
+export default function StatsBar({ nodes, edges, totalNodes, totalEdges: _totalEdges, filtered }: StatsBarProps) {
   const decaying = nodes.filter((n) => n.stability_score < 0.3).length;
   const hot = nodes.filter((n) => n.activation_score > 0.7).length;
   const pinned = nodes.filter((n) => n.manual_pin).length;
@@ -41,7 +41,7 @@ export default function StatsBar({ nodes, edges, totalNodes, totalEdges: _totalE
         </span>
       )}
 
-      {keyword && (
+      {filtered && (
         <>
           <span className={styles.divider}>|</span>
           <span className={styles.stat}>

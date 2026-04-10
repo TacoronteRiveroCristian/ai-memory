@@ -5,6 +5,7 @@ import type { TabId } from "./components/TabSwitcher";
 import TopBar from "./components/TopBar";
 import StatsBar from "./components/StatsBar";
 import BrainGraph from "./components/BrainGraph";
+import type { BrainGraphHandle } from "./components/BrainGraph";
 import MemoryDetail from "./components/MemoryDetail";
 import HealthView from "./components/HealthView";
 import GuideView from "./components/GuideView";
@@ -35,20 +36,24 @@ function mergeSubgraphs(responses: SubgraphResponse[]): {
   return { nodes: Array.from(nodeMap.values()), edges };
 }
 
-function filterByKeyword(
+function nodeMatchesKeyword(n: GraphNode, lower: string): boolean {
+  return (
+    n.content_preview.toLowerCase().includes(lower) ||
+    n.tags.some((t) => t.toLowerCase().includes(lower)) ||
+    n.memory_type.toLowerCase().includes(lower) ||
+    n.project.toLowerCase().includes(lower) ||
+    (n.keyphrases ?? []).some((kp) => kp.toLowerCase().includes(lower))
+  );
+}
+
+function filterByKeywords(
   nodes: GraphNode[],
   edges: GraphEdge[],
-  keyword: string
+  keywords: string[]
 ): { nodes: GraphNode[]; edges: GraphEdge[] } {
-  if (!keyword) return { nodes, edges };
-  const lower = keyword.toLowerCase();
-  const matchingNodes = nodes.filter(
-    (n) =>
-      n.content_preview.toLowerCase().includes(lower) ||
-      n.tags.some((t) => t.toLowerCase().includes(lower)) ||
-      n.memory_type.toLowerCase().includes(lower) ||
-      n.project.toLowerCase().includes(lower) ||
-      (n.keyphrases ?? []).some((kp) => kp.toLowerCase().includes(lower))
+  if (keywords.length === 0) return { nodes, edges };
+  const matchingNodes = nodes.filter((n) =>
+    keywords.every((kw) => nodeMatchesKeyword(n, kw))
   );
   const nodeIds = new Set(matchingNodes.map((n) => n.memory_id));
   const matchingEdges = edges.filter(
@@ -62,7 +67,7 @@ export default function App() {
   const [selectedProjects, setSelectedProjects] = useState<Set<string>>(new Set());
   const [allNodes, setAllNodes] = useState<GraphNode[]>([]);
   const [allEdges, setAllEdges] = useState<GraphEdge[]>([]);
-  const [keyword, setKeyword] = useState("");
+  const [keywords, setKeywords] = useState<string[]>([]);
   const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -70,6 +75,7 @@ export default function App() {
   const [externalHoveredNodeId, setExternalHoveredNodeId] = useState<string | null>(null);
   const [deleteTargets, setDeleteTargets] = useState<FacetProject[]>([]);
   const projectsRef = useRef<FacetProject[]>([]);
+  const brainGraphRef = useRef<BrainGraphHandle>(null);
 
   const loadGraph = useCallback(
     async (selected: Set<string>, projectList?: FacetProject[]) => {
@@ -149,8 +155,8 @@ export default function App() {
     loadGraph(next);
   };
 
-  const handleKeywordChange = (kw: string) => {
-    setKeyword(kw);
+  const handleKeywordsChange = (kws: string[]) => {
+    setKeywords(kws);
   };
 
   const handleNodeNavigate = (memoryId: string) => {
@@ -158,7 +164,7 @@ export default function App() {
     if (node) setSelectedNode(node);
   };
 
-  const { nodes, edges } = filterByKeyword(allNodes, allEdges, keyword);
+  const { nodes, edges } = filterByKeywords(allNodes, allEdges, keywords);
   const projectList = projects.map((p) => p.project);
 
   return (
@@ -167,12 +173,13 @@ export default function App() {
         projects={projects}
         selectedProjects={selectedProjects}
         onProjectChange={handleProjectChange}
-        keyword={keyword}
-        onKeywordChange={handleKeywordChange}
+        keywords={keywords}
+        onKeywordsChange={handleKeywordsChange}
         activeTab={activeTab}
         onTabChange={setActiveTab}
         onDeleteRequest={(p: FacetProject) => setDeleteTargets([p])}
         onBulkDeleteRequest={setDeleteTargets}
+        onCenterView={() => brainGraphRef.current?.centerView()}
       />
 
       {activeTab === "graph" && (
@@ -182,7 +189,7 @@ export default function App() {
             edges={edges}
             totalNodes={allNodes.length}
             totalEdges={allEdges.length}
-            keyword={keyword}
+            filtered={keywords.length > 0}
           />
           <div className={styles.main}>
             {loading ? (
@@ -196,6 +203,7 @@ export default function App() {
               </div>
             ) : (
               <BrainGraph
+                ref={brainGraphRef}
                 nodes={nodes}
                 edges={edges}
                 projectList={projectList}
@@ -218,7 +226,12 @@ export default function App() {
                 }}
                 onNodeNavigate={handleNodeNavigate}
                 onRelationHover={setExternalHoveredNodeId}
-                onKeyphraseClick={(kp) => handleKeywordChange(kp)}
+                onKeyphraseClick={(kp) => {
+                  const lower = kp.toLowerCase();
+                  if (!keywords.includes(lower)) {
+                    handleKeywordsChange([...keywords, lower]);
+                  }
+                }}
               />
             )}
           </div>
