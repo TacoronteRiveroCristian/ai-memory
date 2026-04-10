@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { fetchSubgraph, fetchFacets } from "./api/client";
+import { fetchSubgraph, fetchFacets, deleteProject } from "./api/client";
 import type { GraphNode, GraphEdge, FacetProject, SubgraphResponse } from "./types";
 import type { TabId } from "./components/TabSwitcher";
 import TopBar from "./components/TopBar";
@@ -8,6 +8,7 @@ import BrainGraph from "./components/BrainGraph";
 import MemoryDetail from "./components/MemoryDetail";
 import HealthView from "./components/HealthView";
 import GuideView from "./components/GuideView";
+import DeleteProjectModal from "./components/DeleteProjectModal";
 import styles from "./App.module.css";
 
 function mergeSubgraphs(responses: SubgraphResponse[]): {
@@ -67,6 +68,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<TabId>("graph");
   const [externalHoveredNodeId, setExternalHoveredNodeId] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<FacetProject | null>(null);
   const projectsRef = useRef<FacetProject[]>([]);
 
   const loadGraph = useCallback(
@@ -117,6 +119,25 @@ export default function App() {
     })();
   }, [loadGraph]);
 
+  const handleDeleteProject = useCallback(
+    async (projectName: string) => {
+      await deleteProject(projectName);
+      setDeleteTarget(null);
+      const facetsData = await fetchFacets();
+      const updatedProjects = facetsData.projects || [];
+      setProjects(updatedProjects);
+      projectsRef.current = updatedProjects;
+      const nextSelected = new Set(selectedProjects);
+      nextSelected.delete(projectName);
+      setSelectedProjects(nextSelected);
+      if (selectedNode?.project === projectName) {
+        setSelectedNode(null);
+      }
+      await loadGraph(nextSelected, updatedProjects);
+    },
+    [selectedProjects, selectedNode, loadGraph]
+  );
+
   const handleProjectChange = (next: Set<string>) => {
     setSelectedProjects(next);
     setSelectedNode(null);
@@ -145,6 +166,7 @@ export default function App() {
         onKeywordChange={handleKeywordChange}
         activeTab={activeTab}
         onTabChange={setActiveTab}
+        onDeleteRequest={setDeleteTarget}
       />
 
       {activeTab === "graph" && (
@@ -207,6 +229,14 @@ export default function App() {
         <div className={styles.main}>
           <GuideView />
         </div>
+      )}
+
+      {deleteTarget && (
+        <DeleteProjectModal
+          project={deleteTarget}
+          onConfirm={handleDeleteProject}
+          onCancel={() => setDeleteTarget(null)}
+        />
       )}
     </div>
   );

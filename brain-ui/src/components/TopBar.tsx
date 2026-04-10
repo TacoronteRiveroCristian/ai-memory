@@ -15,6 +15,7 @@ interface TopBarProps {
   onKeywordChange: (keyword: string) => void;
   activeTab: TabId;
   onTabChange: (tab: TabId) => void;
+  onDeleteRequest?: (project: FacetProject) => void;
 }
 
 export default function TopBar({
@@ -25,6 +26,7 @@ export default function TopBar({
   onKeywordChange,
   activeTab,
   onTabChange,
+  onDeleteRequest,
 }: TopBarProps) {
   const [healthy, setHealthy] = useState(true);
 
@@ -54,6 +56,7 @@ export default function TopBar({
           projects={projects}
           selected={selectedProjects}
           onChange={onProjectChange}
+          onDeleteRequest={onDeleteRequest}
         />
         <div className={styles.health}>
           <div

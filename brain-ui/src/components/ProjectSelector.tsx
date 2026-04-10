@@ -17,12 +17,14 @@ interface ProjectSelectorProps {
   projects: FacetProject[];
   selected: Set<string>;
   onChange: (projects: Set<string>) => void;
+  onDeleteRequest?: (project: FacetProject) => void;
 }
 
 export default function ProjectSelector({
   projects,
   selected,
   onChange,
+  onDeleteRequest,
 }: ProjectSelectorProps) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
@@ -140,6 +142,18 @@ export default function ProjectSelector({
                       {p.memory_count} memories &middot; {p.pinned_memory_count} pinned
                     </div>
                   </div>
+                  {onDeleteRequest && (
+                    <button
+                      className={styles.deleteBtn}
+                      title={`Delete ${p.project}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onDeleteRequest(p);
+                      }}
+                    >
+                      &#128465;
+                    </button>
+                  )}
                 </div>
               );
             })}
