@@ -18,6 +18,7 @@ interface ProjectSelectorProps {
   selected: Set<string>;
   onChange: (projects: Set<string>) => void;
   onDeleteRequest?: (project: FacetProject) => void;
+  onBulkDeleteRequest?: (projects: FacetProject[]) => void;
 }
 
 export default function ProjectSelector({
@@ -25,6 +26,7 @@ export default function ProjectSelector({
   selected,
   onChange,
   onDeleteRequest,
+  onBulkDeleteRequest,
 }: ProjectSelectorProps) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
@@ -34,6 +36,9 @@ export default function ProjectSelector({
   useEffect(() => {
     const handleClick = (e: MouseEvent) => {
       if (ref.current && !ref.current.contains(e.target as Node)) {
+        // Don't close if clicking on the delete modal overlay
+        const target = e.target as HTMLElement;
+        if (target.closest("[data-modal-overlay]")) return;
         setOpen(false);
         setSearch("");
       }
@@ -107,8 +112,22 @@ export default function ProjectSelector({
               className={`${styles.item} ${isAll ? styles.itemActive : ""}`}
               onClick={selectAll}
             >
+              {onBulkDeleteRequest && projects.length > 0 && (
+                <button
+                  className={styles.deleteBtn}
+                  title="Eliminar todos los proyectos"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onBulkDeleteRequest(projects);
+                  }}
+                >
+                  <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor">
+                    <path d="M1.5.4L5 3.9 8.5.4 9.6 1.5 6.1 5l3.5 3.5-1.1 1.1L5 6.1 1.5 9.6.4 8.5 3.9 5 .4 1.5z" />
+                  </svg>
+                </button>
+              )}
               <span className={styles.itemIcon}>&#127760;</span>
-              <div>
+              <div className={styles.itemText}>
                 <div className={styles.itemName}>All Projects</div>
                 <div className={styles.itemMeta}>
                   {projects.length} projects &middot; {totalMemories} memories
@@ -125,6 +144,20 @@ export default function ProjectSelector({
                   className={`${styles.item} ${isSelected ? styles.itemActive : ""}`}
                   onClick={() => toggleProject(p.project)}
                 >
+                  {onDeleteRequest && (
+                    <button
+                      className={styles.deleteBtn}
+                      title={`Eliminar ${p.project}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onDeleteRequest(p);
+                      }}
+                    >
+                      <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor">
+                        <path d="M1.5.4L5 3.9 8.5.4 9.6 1.5 6.1 5l3.5 3.5-1.1 1.1L5 6.1 1.5 9.6.4 8.5 3.9 5 .4 1.5z" />
+                      </svg>
+                    </button>
+                  )}
                   <div
                     className={`${styles.checkbox} ${isSelected ? styles.checkboxChecked : ""}`}
                     style={{
@@ -136,24 +169,12 @@ export default function ProjectSelector({
                   >
                     {isSelected && <span className={styles.checkmark}>✓</span>}
                   </div>
-                  <div>
+                  <div className={styles.itemText}>
                     <div className={styles.itemName}>{p.project}</div>
                     <div className={styles.itemMeta}>
                       {p.memory_count} memories &middot; {p.pinned_memory_count} pinned
                     </div>
                   </div>
-                  {onDeleteRequest && (
-                    <button
-                      className={styles.deleteBtn}
-                      title={`Delete ${p.project}`}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onDeleteRequest(p);
-                      }}
-                    >
-                      &#128465;
-                    </button>
-                  )}
                 </div>
               );
             })}
@@ -161,6 +182,23 @@ export default function ProjectSelector({
               <div className={styles.noResults}>No projects match</div>
             )}
           </div>
+          {onBulkDeleteRequest && selected.size > 0 && (
+            <div className={styles.bulkActions}>
+              <button
+                className={styles.bulkDeleteBtn}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  const targets = projects.filter((p) => selected.has(p.project));
+                  onBulkDeleteRequest(targets);
+                }}
+              >
+                <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor" style={{ marginRight: 6 }}>
+                  <path d="M1.5.4L5 3.9 8.5.4 9.6 1.5 6.1 5l3.5 3.5-1.1 1.1L5 6.1 1.5 9.6.4 8.5 3.9 5 .4 1.5z" />
+                </svg>
+                Eliminar {selected.size} seleccionado{selected.size > 1 ? "s" : ""}
+              </button>
+            </div>
+          )}
         </div>
       )}
     </div>

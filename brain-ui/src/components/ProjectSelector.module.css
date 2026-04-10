@@ -176,20 +176,56 @@
   line-height: 1;
 }
 
+.itemText {
+  flex: 1;
+  min-width: 0;
+}
+
 .deleteBtn {
-  margin-left: auto;
   background: none;
-  border: none;
-  color: #555;
-  font-size: 13px;
+  border: 1px solid transparent;
+  color: #3a3a5a;
   cursor: pointer;
-  padding: 2px 6px;
-  border-radius: 4px;
-  transition: color 0.15s, background 0.15s;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   flex-shrink: 0;
+  transition: color 0.15s, background 0.15s, border-color 0.15s;
+  padding: 0;
 }
 
 .deleteBtn:hover {
   color: #ff6b6b;
-  background: rgba(255, 107, 107, 0.1);
+  background: rgba(255, 107, 107, 0.12);
+  border-color: rgba(255, 107, 107, 0.25);
+}
+
+.bulkActions {
+  padding: 6px 8px;
+  border-top: 1px solid #1e1e3a;
+}
+
+.bulkDeleteBtn {
+  width: 100%;
+  background: rgba(220, 38, 38, 0.12);
+  border: 1px solid rgba(220, 38, 38, 0.3);
+  border-radius: 6px;
+  padding: 7px 12px;
+  color: #ff6b6b;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.bulkDeleteBtn:hover {
+  background: rgba(220, 38, 38, 0.2);
+  border-color: rgba(220, 38, 38, 0.5);
 }

@@ -68,7 +68,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<TabId>("graph");
   const [externalHoveredNodeId, setExternalHoveredNodeId] = useState<string | null>(null);
-  const [deleteTarget, setDeleteTarget] = useState<FacetProject | null>(null);
+  const [deleteTargets, setDeleteTargets] = useState<FacetProject[]>([]);
   const projectsRef = useRef<FacetProject[]>([]);
 
   const loadGraph = useCallback(
@@ -119,18 +119,23 @@ export default function App() {
     })();
   }, [loadGraph]);
 
-  const handleDeleteProject = useCallback(
-    async (projectName: string) => {
-      await deleteProject(projectName);
-      setDeleteTarget(null);
+  const handleDeleteProjects = useCallback(
+    async (projectNames: string[]) => {
+      for (const name of projectNames) {
+        await deleteProject(name);
+      }
+      setDeleteTargets([]);
       const facetsData = await fetchFacets();
       const updatedProjects = facetsData.projects || [];
       setProjects(updatedProjects);
       projectsRef.current = updatedProjects;
+      const deletedSet = new Set(projectNames);
       const nextSelected = new Set(selectedProjects);
-      nextSelected.delete(projectName);
+      for (const name of projectNames) {
+        nextSelected.delete(name);
+      }
       setSelectedProjects(nextSelected);
-      if (selectedNode?.project === projectName) {
+      if (selectedNode && deletedSet.has(selectedNode.project)) {
         setSelectedNode(null);
       }
       await loadGraph(nextSelected, updatedProjects);
@@ -166,7 +171,8 @@ export default function App() {
         onKeywordChange={handleKeywordChange}
         activeTab={activeTab}
         onTabChange={setActiveTab}
-        onDeleteRequest={setDeleteTarget}
+        onDeleteRequest={(p: FacetProject) => setDeleteTargets([p])}
+        onBulkDeleteRequest={setDeleteTargets}
       />
 
       {activeTab === "graph" && (
@@ -231,11 +237,11 @@ export default function App() {
         </div>
       )}
 
-      {deleteTarget && (
+      {deleteTargets.length > 0 && (
         <DeleteProjectModal
-          project={deleteTarget}
-          onConfirm={handleDeleteProject}
-          onCancel={() => setDeleteTarget(null)}
+          projects={deleteTargets}
+          onConfirm={handleDeleteProjects}
+          onCancel={() => setDeleteTargets([])}
         />
       )}
     </div>

@@ -93,3 +93,31 @@
   font-size: 12px;
   margin-top: 12px;
 }
+
+.projectList {
+  list-style: none;
+  padding: 0;
+  margin: 8px 0 12px 0;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.projectList li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.projectList li:nth-child(odd) {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.projectCount {
+  color: #555;
+  font-size: 11px;
+  flex-shrink: 0;
+  margin-left: 8px;
+}

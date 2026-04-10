@@ -16,6 +16,7 @@ interface TopBarProps {
   activeTab: TabId;
   onTabChange: (tab: TabId) => void;
   onDeleteRequest?: (project: FacetProject) => void;
+  onBulkDeleteRequest?: (projects: FacetProject[]) => void;
 }
 
 export default function TopBar({
@@ -27,6 +28,7 @@ export default function TopBar({
   activeTab,
   onTabChange,
   onDeleteRequest,
+  onBulkDeleteRequest,
 }: TopBarProps) {
   const [healthy, setHealthy] = useState(true);
 
@@ -57,6 +59,7 @@ export default function TopBar({
           selected={selectedProjects}
           onChange={onProjectChange}
           onDeleteRequest={onDeleteRequest}
+          onBulkDeleteRequest={onBulkDeleteRequest}
         />
         <div className={styles.health}>
           <div
