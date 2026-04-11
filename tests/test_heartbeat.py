@@ -58,3 +58,68 @@ def test_heartbeat_report_stores_cycle(brain_client):
         for c in [latest] + status.get("history", [])
     )
     assert found, f"Cycle {cycle_id} not found in status response"
+
+
+def test_heartbeat_inject_creates_memories_and_relations(brain_client, unique_project_name):
+    """Simulate batch 1 injection and verify relationships form."""
+    project = unique_project_name("hb-e2e")
+
+    import time
+
+    mem_a = brain_client.create_memory(
+        content="La monitorización de inversores fotovoltaicos requiere lectura de registros Modbus TCP cada 10 segundos",
+        project=project,
+        memory_type="architecture",
+        tags="inversores,modbus,monitorizacion",
+        importance=0.85,
+        agent_id="heartbeat-test",
+    )["memory_id"]
+
+    mem_b = brain_client.create_memory(
+        content="Decidimos usar polling síncrono para la lectura de inversores porque el firmware no soporta push",
+        project=project,
+        memory_type="decision",
+        tags="inversores,polling,firmware",
+        importance=0.8,
+        agent_id="heartbeat-test",
+    )["memory_id"]
+
+    time.sleep(1)
+
+    mem_c = brain_client.create_memory(
+        content="Los inversores Huawei SUN2000 reportan potencia activa en el registro 32080",
+        project=project,
+        memory_type="observation",
+        tags="inversores,huawei,registros",
+        importance=0.75,
+        agent_id="heartbeat-test",
+    )["memory_id"]
+
+    time.sleep(1)
+
+    # At least some relations should have formed
+    all_rels = []
+    for mid in [mem_a, mem_b, mem_c]:
+        rels = brain_client.relations(mid).get("relations", [])
+        all_rels.extend(rels)
+
+    assert len(all_rels) > 0, "Expected at least one relation to form between cluster memories"
+
+
+def test_heartbeat_deep_sleep_trigger_and_complete(brain_client):
+    """Trigger deep sleep and verify it completes."""
+    import time
+
+    result = brain_client.post("/api/test/trigger-deep-sleep", {})
+    assert "run_id" in result
+    run_id = result["run_id"]
+
+    # Poll until done (max 120s)
+    for _ in range(24):
+        time.sleep(5)
+        status = brain_client.get(f"/api/test/deep-sleep-status/{run_id}")
+        if status["status"] in ("completed", "failed"):
+            assert status["status"] == "completed", f"Deep sleep failed: {status.get('stats')}"
+            return
+
+    assert False, "Deep sleep did not complete within 120 seconds"
