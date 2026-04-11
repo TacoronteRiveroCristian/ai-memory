@@ -16,12 +16,23 @@ MYELIN_DELTA_CO_ACTIVATION = 0.02
 MYELIN_DELTA_CONSOLIDATION_VALIDATION = 0.08
 MYELIN_DELTA_UTILITY_BONUS = 0.03
 MYELIN_DELTA_DECAY_PER_CYCLE = -0.01
+MYELIN_DELTA_COACTIVATION = 0.03
 MYELIN_DELTA_REM_PRUNE = -0.05
 PERMEABILITY_INCREMENT = 0.01
 PERMEABILITY_MANUAL_BRIDGE = 0.3
 PERMEABILITY_THRESHOLD = 0.15
 PERMEABILITY_DECAY_PER_CYCLE = -0.005
 PERMEABILITY_CO_ACTIVATION = 0.005
+
+
+def compute_myelin_decay_rate(base_decay: float, reinforcement_count: int) -> float:
+    """Adaptive decay — frequently reinforced paths resist forgetting."""
+    return base_decay / (1.0 + 0.3 * reinforcement_count)
+
+
+def compute_max_myelin(reinforcement_count: int) -> float:
+    """Adaptive ceiling — grows with reinforcement, capped at 1.0."""
+    return min(1.0, 0.5 + 0.05 * reinforcement_count)
 
 
 async def record_myelination_event(
@@ -52,25 +63,36 @@ async def update_myelin_score(
     delta: float,
     event_type: str,
 ) -> float:
-    """Update myelin_score on a relation and record the event."""
+    """Update myelin_score on a relation with adaptive ceiling and record the event."""
     import uuid as _uuid
+
+    rid = _uuid.UUID(relation_id) if isinstance(relation_id, str) else relation_id
+
+    # Fetch reinforcement_count for adaptive ceiling
+    rc_row = await conn.fetchrow(
+        "SELECT reinforcement_count FROM memory_relations WHERE id = $1",
+        rid,
+    )
+    reinforcement_count = int(rc_row["reinforcement_count"]) if rc_row else 0
+    max_myelin = compute_max_myelin(reinforcement_count)
 
     row = await conn.fetchrow(
         """
         UPDATE memory_relations
-        SET myelin_score = GREATEST(0.0, LEAST(1.0, myelin_score + $2)),
+        SET myelin_score = GREATEST(0.0, LEAST($3, myelin_score + $2)),
             myelin_last_updated = NOW()
         WHERE id = $1
         RETURNING myelin_score
         """,
-        _uuid.UUID(relation_id) if isinstance(relation_id, str) else relation_id,
+        rid,
         delta,
+        max_myelin,
     )
     new_score = float(row["myelin_score"]) if row else 0.0
     if new_score <= 0.0 and delta < 0:
         await conn.execute(
             "UPDATE memory_relations SET active = FALSE WHERE id = $1",
-            _uuid.UUID(relation_id) if isinstance(relation_id, str) else relation_id,
+            rid,
         )
     await record_myelination_event(conn, relation_id, None, event_type, delta, new_score)
     return new_score
@@ -173,3 +195,53 @@ async def get_permeable_projects(
         threshold,
     )
     return [str(row["name"]) for row in rows]
+
+
+async def strengthen_coactivated_myelin(conn: asyncpg.Connection) -> int:
+    """Strengthen myelin on cross-project relations where both endpoints were recently co-accessed.
+
+    Finds relations where both source and target memories were accessed within 1 hour of each other,
+    increments myelin_score by MYELIN_DELTA_COACTIVATION respecting the adaptive ceiling,
+    and logs a coactivation event.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT mr.id, mr.myelin_score, mr.reinforcement_count,
+               src.project_id AS src_project, dst.project_id AS dst_project
+        FROM memory_relations mr
+        JOIN memory_log src ON src.id = mr.source_memory_id
+        JOIN memory_log dst ON dst.id = mr.target_memory_id
+        WHERE src.project_id <> dst.project_id
+          AND mr.active = TRUE
+          AND src.last_accessed_at IS NOT NULL
+          AND dst.last_accessed_at IS NOT NULL
+          AND ABS(EXTRACT(EPOCH FROM (src.last_accessed_at - dst.last_accessed_at))) < 3600
+          AND GREATEST(src.last_accessed_at, dst.last_accessed_at) > NOW() - INTERVAL '24 hours'
+        """
+    )
+    strengthened = 0
+    for row in rows:
+        reinforcement_count = int(row["reinforcement_count"] or 0)
+        max_my = compute_max_myelin(reinforcement_count)
+        current = float(row["myelin_score"] or 0)
+        new_score = min(max_my, current + MYELIN_DELTA_COACTIVATION)
+        if new_score != current:
+            await conn.execute(
+                """
+                UPDATE memory_relations
+                SET myelin_score = $2, myelin_last_updated = NOW()
+                WHERE id = $1
+                """,
+                row["id"],
+                new_score,
+            )
+            await record_myelination_event(
+                conn,
+                str(row["id"]),
+                None,
+                "coactivation",
+                MYELIN_DELTA_COACTIVATION,
+                new_score,
+            )
+            strengthened += 1
+    return strengthened

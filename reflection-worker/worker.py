@@ -3,6 +3,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -40,6 +41,17 @@ AI_MEMORY_TEST_NOW = os.environ.get("AI_MEMORY_TEST_NOW", "").strip()
 HEARTBEAT_FILE = Path("/tmp/reflection-worker-heartbeat")
 ADVISORY_LOCK_KEY = 829311
 VALID_TASK_STATES = {"pending", "active", "blocked", "done", "cancelled"}
+
+# Negation patterns for suspected contradiction re-evaluation (NREM phase)
+NEGATION_PATTERNS: list[tuple[str, str]] = [
+    (r"\bno\s+usar\b", r"\busar\b"),
+    (r"\bevitar\b", r"\bpreferir\b"),
+    (r"\bdeprecated?\b", r"\brecomend(?:ado|ed)\b"),
+    (r"\bremove[dr]?\b", r"\badd(?:ed)?\b"),
+    (r"\bdisable[dr]?\b", r"\benable[dr]?\b"),
+    (r"\bnot?\s+recommend", r"\brecommend"),
+    (r"\banti[_-]?pattern\b", r"\bbest[_-]?practice\b"),
+]
 
 pg_pool: Optional[asyncpg.Pool] = None
 redis_client: Optional[aioredis.Redis] = None
@@ -906,7 +918,10 @@ async def resolve_contradictions(conn: asyncpg.Connection) -> int:
                     uuid.UUID(mem_a_id),
                 )
             elif res_type == "synthesis":
+                reasoning = resolution.get("reasoning", "")
                 synth_content = f"SYNTHESIS: {str(mem_a['summary'])[:200]} / {str(mem_b['summary'])[:200]}"
+                if reasoning:
+                    synth_content = f"{synth_content}\nReasoning: {reasoning}"
                 project_name = await conn.fetchval(
                     "SELECT p.name FROM memory_log ml JOIN projects p ON p.id = ml.project_id WHERE ml.id = $1::uuid",
                     uuid.UUID(mem_a_id),
@@ -916,21 +931,87 @@ async def resolve_contradictions(conn: asyncpg.Connection) -> int:
                         resp = await api_call("POST", "/api/memories", {
                             "content": synth_content,
                             "project": project_name,
-                            "memory_type": "synthesis",
-                            "importance": 0.8,
-                            "tags": "synthesis,contradiction-resolved",
+                            "memory_type": "schema",
+                            "importance": 0.85,
+                            "tags": "synthesis,contradiction-resolution",
                             "agent_id": "deep-sleep-worker",
                         })
                         synth_id = ""
                         if resp.get("result", "").startswith("OK") and "memory_id=" in resp.get("result", ""):
                             synth_id = resp["result"].split("memory_id=")[1].split()[0]
-                        await conn.execute(
-                            "UPDATE contradiction_queue SET resolution_memory_id = $2::uuid WHERE id = $1",
-                            cq_id,
-                            uuid.UUID(synth_id) if synth_id else None,
-                        )
+                        if synth_id:
+                            # Create derived_from relations to both originals
+                            for orig_id in (mem_a_id, mem_b_id):
+                                try:
+                                    await api_call("POST", "/api/relations", {
+                                        "source_memory_id": synth_id,
+                                        "target_memory_id": orig_id,
+                                        "relation_type": "derived_from",
+                                        "weight": 0.9,
+                                    })
+                                except Exception:
+                                    logger.debug("Failed to create derived_from relation for synthesis %s -> %s", synth_id[:8], orig_id[:8])
+                            # Record in schema_sources
+                            for orig_id in (mem_a_id, mem_b_id):
+                                try:
+                                    await conn.execute(
+                                        """
+                                        INSERT INTO schema_sources (schema_memory_id, source_memory_id)
+                                        VALUES ($1::uuid, $2::uuid)
+                                        ON CONFLICT (schema_memory_id, source_memory_id) DO NOTHING
+                                        """,
+                                        uuid.UUID(synth_id),
+                                        uuid.UUID(orig_id),
+                                    )
+                                except Exception:
+                                    pass
+                            await conn.execute(
+                                "UPDATE contradiction_queue SET resolution_memory_id = $2::uuid WHERE id = $1",
+                                cq_id,
+                                uuid.UUID(synth_id),
+                            )
+                            # Proportional degradation of both originals
+                            for orig_id in (mem_a_id, mem_b_id):
+                                await conn.execute(
+                                    "UPDATE memory_log SET stability_score = GREATEST(0.05, stability_score * 0.5) WHERE id = $1::uuid",
+                                    uuid.UUID(orig_id),
+                                )
                     except Exception as exc:
                         logger.debug("Error creando síntesis: %s", exc)
+            elif res_type == "conditional":
+                cond_content = f"CONDITIONAL: {condition_text or ''} — {str(mem_a['summary'])[:150]} / {str(mem_b['summary'])[:150]}"
+                project_name = await conn.fetchval(
+                    "SELECT p.name FROM memory_log ml JOIN projects p ON p.id = ml.project_id WHERE ml.id = $1::uuid",
+                    uuid.UUID(mem_a_id),
+                )
+                if project_name and condition_text:
+                    try:
+                        resp = await api_call("POST", "/api/memories", {
+                            "content": cond_content,
+                            "project": project_name,
+                            "memory_type": "schema",
+                            "importance": 0.8,
+                            "tags": "conditional,contradiction-resolution",
+                            "agent_id": "deep-sleep-worker",
+                        })
+                        cond_id = ""
+                        if resp.get("result", "").startswith("OK") and "memory_id=" in resp.get("result", ""):
+                            cond_id = resp["result"].split("memory_id=")[1].split()[0]
+                        if cond_id:
+                            # Create applies_to relations to both originals
+                            for orig_id in (mem_a_id, mem_b_id):
+                                try:
+                                    await api_call("POST", "/api/relations", {
+                                        "source_memory_id": cond_id,
+                                        "target_memory_id": orig_id,
+                                        "relation_type": "applies_to",
+                                        "weight": 0.8,
+                                    })
+                                except Exception:
+                                    logger.debug("Failed to create applies_to relation for conditional %s -> %s", cond_id[:8], orig_id[:8])
+                            # No degradation — both originals are correct in context
+                    except Exception as exc:
+                        logger.debug("Error creando conditional resolution: %s", exc)
             await conn.execute(
                 """
                 UPDATE contradiction_queue
@@ -952,16 +1033,17 @@ async def resolve_contradictions(conn: asyncpg.Connection) -> int:
 
 
 async def prune_cold_memories(conn: asyncpg.Connection) -> int:
-    """[8] Poda memorias frías: access_count=0, antiguas, sin pin y sin arousal alto."""
+    """[8][L3] Poda memorias frías: improved criteria — access_count=0, stability<0.2, age>21d, no pin, low arousal."""
     result = await conn.execute(
         """
         UPDATE memory_log ml
-        SET stability_score = GREATEST(0.05, ml.stability_score * 0.5)
+        SET stability_score = GREATEST(0.05, ml.stability_score * 0.3)
         WHERE ml.access_count = 0
+          AND ml.stability_score < 0.2
           AND ml.manual_pin = FALSE
           AND COALESCE(ml.arousal, 0.5) <= 0.6
           AND ml.action_type <> 'schema'
-          AND ml.created_at < NOW() - INTERVAL '30 days'
+          AND ml.created_at < NOW() - INTERVAL '21 days'
         """
     )
     return int(result.split()[-1]) if result else 0
@@ -1047,26 +1129,32 @@ async def validate_synapse_candidates(conn, project_name: str) -> dict[str, int]
     return stats
 
 
-async def apply_myelin_decay(conn) -> int:
-    """[L2] REM phase: decay unused cross-project myelin."""
-    result = await conn.execute(
-        """
-        UPDATE memory_relations
-        SET myelin_score = GREATEST(0.0, myelin_score - 0.01),
-            myelin_last_updated = NOW()
-        WHERE myelin_score > 0
-          AND last_activated_at < NOW() - INTERVAL '48 hours'
-        """
-    )
-    count = int(result.split()[-1]) if result else 0
-    await conn.execute(
-        """
+async def apply_adaptive_myelin_decay(conn) -> int:
+    """[L3] REM phase: adaptive myelin decay — frequently used paths resist forgetting.
+
+    decay_rate = 0.01 / (1 + 0.3 * reinforcement_count)
+    """
+    result = await conn.execute("""
+        WITH decay_calc AS (
+            SELECT id,
+                   GREATEST(0.0, myelin_score - (0.01 / (1.0 + 0.3 * COALESCE(reinforcement_count, 0)))) AS new_score
+            FROM memory_relations
+            WHERE myelin_score > 0
+              AND last_activated_at < NOW() - INTERVAL '48 hours'
+        )
+        UPDATE memory_relations mr
+        SET myelin_score = dc.new_score, myelin_last_updated = NOW()
+        FROM decay_calc dc
+        WHERE mr.id = dc.id
+    """)
+    decayed = int(result.split()[-1]) if result else 0
+    # Deactivate relations that hit zero
+    await conn.execute("""
         UPDATE memory_relations SET active = FALSE
         WHERE myelin_score <= 0 AND myelin_last_updated < NOW() - INTERVAL '7 days'
           AND myelin_score IS NOT NULL
-        """
-    )
-    return count
+    """)
+    return decayed
 
 
 async def apply_permeability_decay(conn) -> int:
@@ -1108,9 +1196,216 @@ async def complete_sleep_cycle(conn, cycle_id: int, stats: dict):
     )
 
 
+async def validate_suspected_contradictions(conn: asyncpg.Connection) -> dict[str, int]:
+    """[L3] NREM: re-evaluate suspected contradictions using valence opposition + negation patterns.
+
+    Promotes to 'pending' if rescore > 0.5, dismisses if < 0.3, else keeps as 'suspected'.
+    """
+    stats = {"promoted": 0, "dismissed": 0}
+    rows = await conn.fetch(
+        """
+        SELECT cq.id, cq.memory_a_id, cq.memory_b_id,
+               ma.summary AS summary_a, ma.valence AS valence_a,
+               mb.summary AS summary_b, mb.valence AS valence_b
+        FROM contradiction_queue cq
+        JOIN memory_log ma ON ma.id = cq.memory_a_id
+        JOIN memory_log mb ON mb.id = cq.memory_b_id
+        WHERE cq.resolution_status = 'suspected'
+        ORDER BY cq.created_at ASC
+        LIMIT 50
+        """
+    )
+    for row in rows:
+        score = 0.0
+        valence_a = float(row["valence_a"] or 0)
+        valence_b = float(row["valence_b"] or 0)
+        # Valence opposition
+        if valence_a * valence_b < 0:
+            score += 0.35
+        # Negation pattern matching
+        lower_a = str(row["summary_a"] or "").lower()
+        lower_b = str(row["summary_b"] or "").lower()
+        pattern_score = 0.0
+        for pat_a, pat_b in NEGATION_PATTERNS:
+            if (re.search(pat_a, lower_a) and re.search(pat_b, lower_b)) or \
+               (re.search(pat_b, lower_a) and re.search(pat_a, lower_b)):
+                pattern_score += 0.15
+        score += min(pattern_score, 0.35)
+        # Content length divergence as weak signal
+        len_a, len_b = len(lower_a), len(lower_b)
+        if len_a > 0 and len_b > 0 and max(len_a, len_b) / min(len_a, len_b) > 3:
+            score += 0.10
+        score = min(score, 1.0)
+
+        if score > 0.5:
+            await conn.execute(
+                "UPDATE contradiction_queue SET resolution_status = 'pending' WHERE id = $1",
+                row["id"],
+            )
+            stats["promoted"] += 1
+        elif score < 0.3:
+            await conn.execute(
+                "UPDATE contradiction_queue SET resolution_status = 'dismissed', resolved_at = NOW() WHERE id = $1",
+                row["id"],
+            )
+            stats["dismissed"] += 1
+        # else: keep as 'suspected'
+    return stats
+
+
+async def cleanup_orphan_relations(conn: asyncpg.Connection) -> int:
+    """[L3] REM: deactivate relations where both endpoints have very low stability."""
+    result = await conn.execute(
+        """
+        UPDATE memory_relations mr
+        SET active = FALSE, updated_at = NOW()
+        FROM memory_log src, memory_log dst
+        WHERE mr.source_memory_id = src.id
+          AND mr.target_memory_id = dst.id
+          AND src.stability_score < 0.1
+          AND dst.stability_score < 0.1
+          AND mr.active = TRUE
+          AND mr.origin <> 'manual'
+        """
+    )
+    return int(result.split()[-1]) if result else 0
+
+
+async def expire_stale_candidates(conn: asyncpg.Connection) -> int:
+    """[L3] REM: expire Tier 3 synapse candidates older than 72 hours."""
+    result = await conn.execute(
+        """
+        UPDATE synapse_candidates
+        SET status = 'expired', reviewed_at = NOW()
+        WHERE status = 'pending'
+          AND created_at < NOW() - INTERVAL '72 hours'
+        """
+    )
+    return int(result.split()[-1]) if result else 0
+
+
+async def strengthen_cross_project_myelin(conn: asyncpg.Connection) -> int:
+    """[L3] NREM: strengthen myelin for cross-project relations with co-activated endpoints.
+
+    Finds relations where both source and target memories were accessed within 1 hour
+    of each other in the last 24 hours. Increments myelin_score by 0.03, capped at
+    min(1.0, 0.5 + 0.05 * reinforcement_count).
+    """
+    result = await conn.execute("""
+        UPDATE memory_relations mr
+        SET myelin_score = LEAST(
+                LEAST(1.0, 0.5 + 0.05 * COALESCE(mr.reinforcement_count, 0)),
+                COALESCE(mr.myelin_score, 0.0) + 0.03
+            ),
+            myelin_last_updated = NOW()
+        FROM memory_log src, memory_log dst
+        WHERE mr.source_memory_id = src.id
+          AND mr.target_memory_id = dst.id
+          AND src.project_id <> dst.project_id
+          AND src.last_accessed_at > NOW() - INTERVAL '24 hours'
+          AND dst.last_accessed_at > NOW() - INTERVAL '24 hours'
+          AND ABS(EXTRACT(EPOCH FROM (src.last_accessed_at - dst.last_accessed_at))) < 3600
+          AND mr.active = TRUE
+    """)
+    return int(result.split()[-1]) if result else 0
+
+
+async def run_nrem_phase(conn: asyncpg.Connection, run_id, project_names: list[str]) -> dict:
+    """[L3] NREM phase — Strengthen & Abstract.
+
+    1. Schema extraction
+    2. Suspected contradiction validation
+    3. Synapse candidate validation
+    4. Cluster reinforcement
+    5. Contradiction resolution
+    """
+    nrem_stats = {
+        "schemas_created": 0,
+        "suspected_promoted": 0,
+        "suspected_dismissed": 0,
+        "candidates_promoted": 0,
+        "candidates_rejected": 0,
+        "clusters_reinforced": 0,
+        "coactivation_strengthened": 0,
+        "contradictions_resolved": 0,
+    }
+    # 1. Schema extraction
+    await update_heartbeat()
+    nrem_stats["schemas_created"] = await run_schema_extraction(conn, run_id)
+
+    # 2. Suspected contradiction validation
+    await update_heartbeat()
+    suspected = await validate_suspected_contradictions(conn)
+    nrem_stats["suspected_promoted"] = suspected["promoted"]
+    nrem_stats["suspected_dismissed"] = suspected["dismissed"]
+
+    # 3. Synapse candidate validation per project
+    await update_heartbeat()
+    for pname in project_names:
+        try:
+            cstats = await validate_synapse_candidates(conn, pname)
+            nrem_stats["candidates_promoted"] += cstats["promoted"]
+            nrem_stats["candidates_rejected"] += cstats["rejected"]
+        except Exception as exc:
+            logger.warning("[L3] NREM candidate validation failed for %s: %s", pname, exc)
+
+    # 4. Cluster reinforcement
+    await update_heartbeat()
+    nrem_stats["clusters_reinforced"] = await reinforce_hot_clusters(conn)
+
+    # 4b. Cross-project co-activation myelin strengthening
+    await update_heartbeat()
+    coactivated = await strengthen_cross_project_myelin(conn)
+    nrem_stats["coactivation_strengthened"] = coactivated
+
+    # 5. Contradiction resolution
+    await update_heartbeat()
+    nrem_stats["contradictions_resolved"] = await resolve_contradictions(conn)
+
+    return nrem_stats
+
+
+async def run_rem_phase(conn: asyncpg.Connection) -> dict:
+    """[L3] REM phase — Prune & Clean.
+
+    1. Cold memory pruning (improved criteria)
+    2. Orphan relation cleanup
+    3. Adaptive myelin decay
+    4. Permeability decay
+    5. Tier 3 candidate expiry
+    """
+    rem_stats = {
+        "memories_pruned": 0,
+        "relations_orphaned": 0,
+        "myelin_decayed": 0,
+        "permeability_decayed": 0,
+        "candidates_expired": 0,
+    }
+    # 1. Cold memory pruning
+    await update_heartbeat()
+    rem_stats["memories_pruned"] = await prune_cold_memories(conn)
+
+    # 2. Orphan relation cleanup
+    await update_heartbeat()
+    rem_stats["relations_orphaned"] = await cleanup_orphan_relations(conn)
+
+    # 3. Adaptive myelin decay
+    await update_heartbeat()
+    rem_stats["myelin_decayed"] = await apply_adaptive_myelin_decay(conn)
+
+    # 4. Permeability decay
+    await update_heartbeat()
+    rem_stats["permeability_decayed"] = await apply_permeability_decay(conn)
+
+    # 5. Tier 3 candidate expiry
+    await update_heartbeat()
+    rem_stats["candidates_expired"] = await expire_stale_candidates(conn)
+
+    return rem_stats
+
+
 async def handle_deep_sleep():
-    """[8][L2] Deep Sleep Phase: consolidación profunda con NREM candidate validation y REM decay.
-    Extrae esquemas, resuelve contradicciones, poda memorias frías y refuerza clusters."""
+    """[8][L3] Deep Sleep Phase: structured NREM (strengthen/abstract) then REM (prune/clean)."""
     if not pg_pool:
         return
     async with pg_pool.acquire() as conn:
@@ -1118,7 +1413,7 @@ async def handle_deep_sleep():
         if not locked:
             return
         try:
-            # Verificar si es momento del deep sleep
+            # Check if deep sleep interval has elapsed
             last_run = await conn.fetchval(
                 "SELECT COALESCE(finished_at, started_at) FROM deep_sleep_runs ORDER BY started_at DESC LIMIT 1"
             )
@@ -1127,16 +1422,7 @@ async def handle_deep_sleep():
             run_id = await conn.fetchval(
                 "INSERT INTO deep_sleep_runs (status) VALUES ('running') RETURNING id"
             )
-            logger.info("[8] Deep Sleep iniciado (run_id=%s)", run_id)
-            schemas_created = 0
-            contradictions_resolved = 0
-            memories_pruned = 0
-            relations_reinforced = 0
-            memories_scanned_val = 0
-            candidates_promoted = 0
-            candidates_rejected = 0
-            myelin_decayed = 0
-            permeability_decayed = 0
+            logger.info("[L3] Deep Sleep iniciado (run_id=%s)", run_id)
             error_text = None
 
             # Get all projects with activity
@@ -1146,53 +1432,53 @@ async def handle_deep_sleep():
                 )
             ]
 
+            nrem_stats = {}
+            rem_stats = {}
             try:
-                await update_heartbeat()
-                schemas_created = await run_schema_extraction(conn, run_id)
-                await update_heartbeat()
-                contradictions_resolved = await resolve_contradictions(conn)
-                await update_heartbeat()
-                memories_pruned = await prune_cold_memories(conn)
-                await update_heartbeat()
-                relations_reinforced = await reinforce_hot_clusters(conn)
+                # NREM phase — strengthen & abstract
+                nrem_stats = await run_nrem_phase(conn, run_id, project_names)
+                logger.info(
+                    "[L3] NREM complete: schemas=%d suspected_promoted=%d suspected_dismissed=%d "
+                    "candidates_promoted=%d candidates_rejected=%d reinforced=%d contradictions=%d",
+                    nrem_stats.get("schemas_created", 0),
+                    nrem_stats.get("suspected_promoted", 0),
+                    nrem_stats.get("suspected_dismissed", 0),
+                    nrem_stats.get("candidates_promoted", 0),
+                    nrem_stats.get("candidates_rejected", 0),
+                    nrem_stats.get("clusters_reinforced", 0),
+                    nrem_stats.get("contradictions_resolved", 0),
+                )
 
-                # [L2] NREM: Validate synapse candidates per project
-                for pname in project_names:
-                    try:
-                        cstats = await validate_synapse_candidates(conn, pname)
-                        candidates_promoted += cstats["promoted"]
-                        candidates_rejected += cstats["rejected"]
-                    except Exception as exc:
-                        logger.warning("[L2] NREM candidate validation failed for %s: %s", pname, exc)
-                await update_heartbeat()
-
-                # [L2] REM: Myelin and permeability decay
-                myelin_decayed = await apply_myelin_decay(conn)
-                permeability_decayed = await apply_permeability_decay(conn)
-                await update_heartbeat()
-
-                memories_scanned_val = await conn.fetchval("SELECT COUNT(*) FROM memory_log") or 0
+                # REM phase — prune & clean
+                rem_stats = await run_rem_phase(conn)
+                logger.info(
+                    "[L3] REM complete: pruned=%d orphaned=%d myelin_decayed=%d "
+                    "permeability_decayed=%d candidates_expired=%d",
+                    rem_stats.get("memories_pruned", 0),
+                    rem_stats.get("relations_orphaned", 0),
+                    rem_stats.get("myelin_decayed", 0),
+                    rem_stats.get("permeability_decayed", 0),
+                    rem_stats.get("candidates_expired", 0),
+                )
             except Exception as exc:
-                logger.exception("[8] Deep Sleep fallo parcialmente")
+                logger.exception("[L3] Deep Sleep failed partially")
                 error_text = str(exc)[:2000]
 
-            # Record to sleep_cycles
-            sleep_stats = {
-                "schemas_created": schemas_created,
-                "contradictions_resolved": contradictions_resolved,
-                "memories_pruned": memories_pruned,
-                "relations_reinforced": relations_reinforced,
-                "candidates_promoted": candidates_promoted,
-                "candidates_rejected": candidates_rejected,
-                "myelin_decayed": myelin_decayed,
-                "permeability_decayed": permeability_decayed,
-            }
+            # Record two sleep cycles: NREM and REM
             try:
-                cycle_id = await record_sleep_cycle(conn, "nrem", "deep_sleep_interval", project_names, {})
-                await complete_sleep_cycle(conn, cycle_id, sleep_stats)
+                nrem_cycle_id = await record_sleep_cycle(conn, "nrem", "deep_sleep_interval", project_names, {})
+                await complete_sleep_cycle(conn, nrem_cycle_id, nrem_stats)
             except Exception:
-                logger.debug("Failed to record sleep cycle")
+                logger.debug("Failed to record NREM sleep cycle")
+            try:
+                rem_cycle_id = await record_sleep_cycle(conn, "rem", "deep_sleep_interval", project_names, {})
+                await complete_sleep_cycle(conn, rem_cycle_id, rem_stats)
+            except Exception:
+                logger.debug("Failed to record REM sleep cycle")
 
+            # Compute combined stats for deep_sleep_runs
+            memories_scanned_val = await conn.fetchval("SELECT COUNT(*) FROM memory_log") or 0
+            combined = {**nrem_stats, **rem_stats}
             await conn.execute(
                 """
                 UPDATE deep_sleep_runs
@@ -1209,18 +1495,13 @@ async def handle_deep_sleep():
                 run_id,
                 "failed" if error_text else "completed",
                 memories_scanned_val,
-                schemas_created,
-                contradictions_resolved,
-                memories_pruned,
-                relations_reinforced,
+                combined.get("schemas_created", 0),
+                combined.get("contradictions_resolved", 0),
+                combined.get("memories_pruned", 0),
+                combined.get("clusters_reinforced", 0),
                 error_text,
             )
-            logger.info(
-                "[8][L2] Deep Sleep completado: schemas=%d contradictions=%d pruned=%d reinforced=%d "
-                "candidates_promoted=%d candidates_rejected=%d myelin_decayed=%d permeability_decayed=%d",
-                schemas_created, contradictions_resolved, memories_pruned, relations_reinforced,
-                candidates_promoted, candidates_rejected, myelin_decayed, permeability_decayed,
-            )
+            logger.info("[L3] Deep Sleep completed (run_id=%s)", run_id)
         finally:
             await conn.execute("SELECT pg_advisory_unlock($1)", ADVISORY_LOCK_KEY + 1)
 
