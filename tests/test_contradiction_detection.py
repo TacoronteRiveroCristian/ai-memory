@@ -13,6 +13,8 @@ def test_contradiction_detected_automatically(brain_client, unique_project_name)
         project=project,
         memory_type="decision",
         tags=["redis", "cache", "embeddings"],
+        importance=0.85,
+        agent_id="pytest",
     )["memory_id"]
 
     # Small pause so auto-link can run against first memory
@@ -23,6 +25,8 @@ def test_contradiction_detected_automatically(brain_client, unique_project_name)
         project=project,
         memory_type="decision",
         tags=["redis", "cache", "memcached"],
+        importance=0.85,
+        agent_id="pytest",
     )["memory_id"]
 
     time.sleep(0.5)
@@ -60,6 +64,8 @@ def test_no_false_contradiction(brain_client, unique_project_name):
         project=project,
         memory_type="observation",
         tags=["redis", "cache"],
+        importance=0.85,
+        agent_id="pytest",
     )["memory_id"]
 
     time.sleep(0.5)
@@ -69,6 +75,8 @@ def test_no_false_contradiction(brain_client, unique_project_name):
         project=project,
         memory_type="observation",
         tags=["redis", "cache"],
+        importance=0.85,
+        agent_id="pytest",
     )["memory_id"]
 
     time.sleep(0.5)

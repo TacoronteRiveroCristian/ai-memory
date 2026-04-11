@@ -1847,9 +1847,8 @@ async def infer_relations_from_candidates(
             _days_apart = 0.0
             if _ca and _cb:
                 try:
-                    from datetime import datetime as _dt
-                    _ta = _ca if not isinstance(_ca, str) else _dt.fromisoformat(_ca.replace("Z", "+00:00"))
-                    _tb = _cb if not isinstance(_cb, str) else _dt.fromisoformat(_cb.replace("Z", "+00:00"))
+                    _ta = _ca if not isinstance(_ca, str) else datetime.fromisoformat(_ca.replace("Z", "+00:00"))
+                    _tb = _cb if not isinstance(_cb, str) else datetime.fromisoformat(_cb.replace("Z", "+00:00"))
                     _days_apart = abs((_ta - _tb).total_seconds()) / 86400.0
                 except Exception:
                     pass
@@ -2736,65 +2735,72 @@ async def consolidate_activation(project_name: str) -> int:
     and last_accessed_at in the database (filtered by *project_name*).
     Returns the number of consolidated memories.
     """
-    if not redis_client or not pg_pool:
-        return 0
+    try:
+        if not redis_client or not pg_pool:
+            return 0
 
-    keys: list[str] = []
-    async for key in redis_client.scan_iter(match="activation_propagation:*", count=200):
-        keys.append(key if isinstance(key, str) else key.decode())
+        keys: list[str] = []
+        async for key in redis_client.scan_iter(match="activation_propagation:*", count=200):
+            keys.append(key if isinstance(key, str) else key.decode())
 
-    if not keys:
-        return 0
+        if not keys:
+            return 0
 
-    values = await redis_client.mget(keys)
+        values = await redis_client.mget(keys)
 
-    # Build {memory_id: energy} for entries above noise threshold
-    candidates: dict[str, float] = {}
-    for key, val in zip(keys, values):
-        if val is None:
-            continue
-        try:
-            energy = float(val)
-        except (TypeError, ValueError):
-            continue
-        if energy < 0.1:
-            continue
-        memory_id = key.split(":", 1)[1] if ":" in key else key
-        candidates[memory_id] = energy
-
-    if not candidates:
-        return 0
-
-    consolidated = 0
-    current_time = now_utc()
-    async with pg_pool.acquire() as conn:
-        for memory_id, energy in candidates.items():
-            if energy < ACTIVATION_CONSOLIDATION_THRESHOLD:
+        # Build {memory_id: energy} for entries above noise threshold
+        candidates: dict[str, float] = {}
+        for key, val in zip(keys, values):
+            if val is None:
                 continue
             try:
-                result = await conn.execute(
-                    """
-                    UPDATE memory_log ml
-                    SET activation_score = LEAST(1.0, COALESCE(ml.activation_score, 0.0) + $1 * $2),
-                        access_count = COALESCE(ml.access_count, 0) + 1,
-                        last_accessed_at = $3::timestamptz
-                    FROM projects p
-                    WHERE p.id = ml.project_id
-                      AND p.name = $4
-                      AND ml.id = $5::uuid
-                    """,
-                    energy,
-                    CONSOLIDATION_FACTOR,
-                    current_time,
-                    project_name,
-                    uuid.UUID(memory_id),
-                )
-                if result and result.split()[-1] != "0":
-                    consolidated += 1
-            except Exception as exc:
-                logger.debug("Failed to consolidate activation for %s: %s", memory_id, exc)
+                energy = float(val)
+            except (TypeError, ValueError):
+                continue
+            if energy < 0.1:
+                continue
+            memory_id = key.split(":", 1)[1] if ":" in key else key
+            candidates[memory_id] = energy
 
-    return consolidated
+        if not candidates:
+            return 0
+
+        consolidated = 0
+        current_time = now_utc()
+        async with pg_pool.acquire() as conn:
+            for memory_id, energy in candidates.items():
+                if energy < ACTIVATION_CONSOLIDATION_THRESHOLD:
+                    continue
+                try:
+                    result = await conn.execute(
+                        """
+                        UPDATE memory_log ml
+                        SET activation_score = LEAST(1.0, COALESCE(ml.activation_score, 0.0) + $1 * $2),
+                            access_count = COALESCE(ml.access_count, 0) + 1,
+                            last_accessed_at = $3::timestamptz
+                        FROM projects p
+                        WHERE p.id = ml.project_id
+                          AND p.name = $4
+                          AND ml.id = $5::uuid
+                        """,
+                        energy,
+                        CONSOLIDATION_FACTOR,
+                        current_time,
+                        project_name,
+                        uuid.UUID(memory_id),
+                    )
+                    if result and result.split()[-1] != "0":
+                        consolidated += 1
+                except Exception as exc:
+                    logger.debug("Failed to consolidate activation for %s: %s", memory_id, exc)
+
+        if consolidated > 0:
+            logger.info("[4] LTP consolidation: %d memories strengthened for project %s", consolidated, project_name)
+
+        return consolidated
+    except Exception as exc:
+        logger.debug("consolidate_activation failed for project %s: %s", project_name, exc)
+        return 0
 
 
 async def apply_session_plasticity(payload: SessionSummaryRequest) -> dict[str, Any]:

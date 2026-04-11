@@ -324,6 +324,7 @@ CONTRADICTION_PATTERNS: list[tuple[str, str]] = [
     (r"\bdisable[dr]?\b", r"\benable[dr]?\b"),
     (r"\bnot?\s+recommend", r"\brecommend"),
     (r"\banti[_-]?pattern\b", r"\bbest[_-]?practice\b"),
+    (r"\bno\s+(?:es|son|fue)\b.*\b(?:bueno|recomendable|adecuado)\b", r"\b(?:es|son|fue)\b.*\b(?:bueno|recomendable|adecuado)\b"),
 ]
 
 
@@ -369,4 +370,4 @@ def compute_contradiction_score(
     if len(kp_a & kp_b) >= 2 and days_apart > 30:
         score += 0.20
 
-    return min(max(score, 0.0), 1.0)
+    return round(min(max(score, 0.0), 1.0), 4)
