@@ -41,6 +41,7 @@ from sensory_cortex import (
     canonicalize_tags as sc_canonicalize_tags,
     classify_synapse_cascade,
     compute_combined_score,
+    compute_contradiction_score,
     emotional_proximity as sc_emotional_proximity,
     importance_attraction as sc_importance_attraction,
     temporal_proximity as sc_temporal_proximity,
@@ -1834,6 +1835,66 @@ async def infer_relations_from_candidates(
             }
 
             result = classify_synapse_cascade(signals, cross_project)
+
+            # --- Proactive contradiction detection ---
+            source_valence = float(source_memory.get("valence", 0.0) or 0.0)
+            candidate_valence = float(candidate.get("valence", 0.0) or 0.0)
+            source_keyphrases = source_memory.get("keyphrases") or source_memory.get("tags") or []
+            candidate_keyphrases = candidate.get("keyphrases") or candidate.get("tags") or []
+            # Compute days apart
+            _ca = source_memory.get("created_at")
+            _cb = candidate.get("created_at")
+            _days_apart = 0.0
+            if _ca and _cb:
+                try:
+                    from datetime import datetime as _dt
+                    _ta = _ca if not isinstance(_ca, str) else _dt.fromisoformat(_ca.replace("Z", "+00:00"))
+                    _tb = _cb if not isinstance(_cb, str) else _dt.fromisoformat(_cb.replace("Z", "+00:00"))
+                    _days_apart = abs((_ta - _tb).total_seconds()) / 86400.0
+                except Exception:
+                    pass
+            contradiction_score = compute_contradiction_score(
+                signals, source_text, candidate_text,
+                valence_a=source_valence, valence_b=candidate_valence,
+                keyphrases_a=list(source_keyphrases), keyphrases_b=list(candidate_keyphrases),
+                days_apart=_days_apart,
+            )
+
+            if contradiction_score > 0.6:
+                # Strong contradiction — create contradicts relation immediately
+                relation_data = await upsert_memory_relation(
+                    source_memory_id=source_memory["id"],
+                    target_memory_id=candidate["id"],
+                    relation_type="contradicts",
+                    weight=round(contradiction_score, 4),
+                    origin=origin,
+                    evidence={
+                        "reason": "proactive_contradiction_detected",
+                        "contradiction_score": contradiction_score,
+                        "signals": signals,
+                        "source_project": source_memory.get("project"),
+                        "target_project": candidate["project"],
+                    },
+                )
+                created.append(relation_data)
+                continue
+            elif contradiction_score >= 0.4:
+                # Suspected contradiction — enqueue for review
+                if pg_pool:
+                    try:
+                        async with pg_pool.acquire() as conn:
+                            await conn.execute(
+                                """
+                                INSERT INTO contradiction_queue (memory_a_id, memory_b_id, resolution_status)
+                                VALUES ($1::uuid, $2::uuid, 'suspected')
+                                ON CONFLICT (memory_a_id, memory_b_id) DO NOTHING
+                                """,
+                                uuid.UUID(source_memory["id"]),
+                                uuid.UUID(candidate["id"]),
+                            )
+                    except Exception as exc:
+                        logger.debug("Failed to enqueue suspected contradiction: %s", exc)
+
             if result is None:
                 continue
 
@@ -1879,6 +1940,7 @@ async def infer_relations_from_candidates(
                     "reason": result["reason"],
                     "tier": result["tier"],
                     "signals": signals,
+                    "contradiction_score": contradiction_score,
                     "source_project": source_memory.get("project"),
                     "target_project": candidate["project"],
                 },
