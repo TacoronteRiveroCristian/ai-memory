@@ -152,14 +152,65 @@ async def _oauth_not_supported():
 async def _unhandled_exception_handler(request: Request, exc: Exception):
     logger.exception("Unhandled exception %s %s", request.method, request.url.path)
     return JSONResponse(status_code=500, content={"detail": "internal_error"})
+
+
+PROACTIVE_MEMORY_PROTOCOL = """\
+=== PROACTIVE MEMORY PROTOCOL ===
+
+You are connected to AI Memory Brain. Save knowledge proactively — don't wait \
+to be asked. Your memories persist across sessions and benefit all agents.
+
+── TRIGGERS ──────────────────────────────────────────────────────────
+Save immediately when any of these occur:
+
+| Event                         | Action                                                                  |
+|-------------------------------|-------------------------------------------------------------------------|
+| Decision made                 | store_decision(title, decision, project, rationale, alternatives, tags) |
+| Bug / error found             | store_error(error_description, solution, project, error_signature, tags)|
+| Pattern / insight discovered  | store_memory(content, project, memory_type="observation", tags)         |
+| Architecture discussed        | store_memory(content, project, memory_type="architecture", tags)        |
+| Task state changes            | update_task_state(task_title, project, new_state, details)              |
+| Error resolved                | store_error(error_description, solution, project, error_signature, tags)|
+| Cross-project connection      | bridge_projects(project, related_project, reason)                       |
+| Memories relate               | link_memories(source_memory_id, target_memory_id, relation_type, reason)|
+
+── FORMAT ────────────────────────────────────────────────────────────
+content   : WHAT happened + WHY it matters + CONTEXT (self-contained paragraph)
+tags      : hierarchical, comma-separated (e.g. backend/api, bug/resolved, pattern/retry)
+importance:
+  0.5  — routine (style tweak, minor refactor)
+  0.7  — notable (new endpoint, config change)
+  0.85 — important (architectural decision, tricky bug)
+  0.95 — critical (data-loss risk, security fix, breaking change)
+memory_type: general | observation | decision | error | architecture | schema | synthesis
+
+── SESSION LIFECYCLE ─────────────────────────────────────────────────
+START  → call get_project_context to load prior knowledge
+DURING → save continuously as triggers fire (don't batch at the end)
+END    → call record_session_summary with what was accomplished
+
+── QUALITY OVER QUANTITY ─────────────────────────────────────────────
+• Save WHY, not just WHAT — future-you needs reasoning, not play-by-play
+• For decisions, include alternatives considered and why they were rejected
+• For errors, include the signature/traceback and the root cause
+• Do NOT save: trivial info, things already in git, transient debug output
+"""
+
 mcp = FastMCP(
     "AIMemoryBrain",
+    instructions=PROACTIVE_MEMORY_PROTOCOL,
     streamable_http_path="/",
     # This instance is accessed from other machines on the LAN during testing,
     # so localhost-only host validation would reject legitimate requests.
     transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
 )
 mcp_app = mcp.streamable_http_app()
+
+
+@mcp.resource("memory://protocol")
+async def get_protocol() -> str:
+    """Returns the proactive memory save protocol for agents."""
+    return PROACTIVE_MEMORY_PROTOCOL
 
 
 class MemoryCreateRequest(BaseModel):

@@ -1,0 +1,22 @@
+{
+  "hooks": {
+    "session-start": [
+      {
+        "type": "command",
+        "command": "./plugin/claude-code/hooks/session-start.sh"
+      }
+    ],
+    "session-stop": [
+      {
+        "type": "command",
+        "command": "./plugin/claude-code/hooks/session-stop.sh"
+      }
+    ],
+    "post-compaction": [
+      {
+        "type": "command",
+        "command": "./plugin/claude-code/hooks/post-compaction.sh"
+      }
+    ]
+  }
+}

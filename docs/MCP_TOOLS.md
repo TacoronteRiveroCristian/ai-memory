@@ -2,6 +2,36 @@
 
 Esta guía documenta las tools expuestas por `AI Memory Brain` desde `api-server/server.py`.
 
+## Protocolo proactivo de guardado
+
+AI Memory Brain incluye un protocolo que enseña a los agentes a guardar memorias de forma proactiva — sin esperar instrucciones explícitas del usuario. El protocolo se entrega en tres capas complementarias:
+
+| Capa                 | Mecanismo                  | Alcance              |
+|----------------------|----------------------------|----------------------|
+| **serverInstructions** | Campo `instructions` de FastMCP | Todos los clientes MCP |
+| **MCP resource**     | `memory://protocol` (recurso legible) | Acceso programático  |
+| **Plugin Claude Code** | `plugin/claude-code/SKILL.md` + hooks | Solo Claude Code     |
+
+### serverInstructions
+
+Se pasan automáticamente al cliente MCP al conectarse. Contienen las reglas base: triggers (cuándo guardar), formato (content, tags, importance), ciclo de vida de sesión, y directrices de calidad.
+
+### MCP resource `memory://protocol`
+
+Permite que cualquier agente lea el protocolo completo bajo demanda:
+
+```
+resource: memory://protocol
+```
+
+### Plugin Claude Code
+
+Extiende el protocolo con ejemplos concretos (payloads JSON para cada tool), tabla de calibración de importancia, anti-patrones, y vocabulario de tags. Los hooks de shell automatizan los recordatorios en inicio/fin de sesión y tras compactación de contexto.
+
+Para instrucciones de instalación, ver `plugin/claude-code/README.md`.
+
+---
+
 ## Flujo recomendado para agentes
 
 ### 1. Al empezar una sesión
