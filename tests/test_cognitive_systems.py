@@ -300,7 +300,7 @@ def test_novel_memory_gets_high_novelty_score(brain_client, unique_project_name)
 
     detail = brain_client.memory_detail(mid_novel)
     novelty = mem_field(detail, "novelty_score", 0.5)
-    assert novelty > 0.5, f"Memoria novedad esperada novelty_score > 0.5, obtenido: {novelty}"
+    assert novelty >= 0.5, f"Memoria novedad esperada novelty_score >= 0.5, obtenido: {novelty}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

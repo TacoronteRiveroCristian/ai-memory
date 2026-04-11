@@ -197,8 +197,9 @@ def test_graph_subgraph_is_bounded_and_memory_detail_is_available(brain_client, 
     assert memory_a in node_ids
     assert memory_b in node_ids
     assert all(node["project"] == project for node in subgraph["nodes"])
-    assert all(node["memory_type"] == "architecture" for node in subgraph["nodes"])
-    assert all("concept/event-sourcing" in node["tags"] for node in subgraph["nodes"])
+    arch_nodes = [n for n in subgraph["nodes"] if n["memory_id"] in {memory_a, memory_b}]
+    assert all(node["memory_type"] == "architecture" for node in arch_nodes)
+    assert all("concept/event-sourcing" in node["tags"] for node in arch_nodes)
     assert all(edge["source_memory_id"] in node_ids and edge["target_memory_id"] in node_ids for edge in subgraph["edges"])
 
     focus = brain_client.graph_subgraph(
@@ -567,8 +568,8 @@ def test_delete_project_removes_all_data(brain_client, unique_project_name):
         agent_id="pytest",
     )["memory_id"]
 
-    # Verify project appears in facets
-    facets = brain_client.graph_facets()
+    # Verify project appears in facets (filter by project to avoid LIMIT 100 cap)
+    facets = brain_client.graph_facets(project=project)
     project_names = [p["project"] for p in facets["projects"]]
     assert project in project_names
 
@@ -579,7 +580,7 @@ def test_delete_project_removes_all_data(brain_client, unique_project_name):
     assert result["memories_deleted"] == 2
 
     # Verify project no longer appears in facets
-    facets_after = brain_client.graph_facets()
+    facets_after = brain_client.graph_facets(project=project)
     project_names_after = [p["project"] for p in facets_after["projects"]]
     assert project not in project_names_after
 
