@@ -6,7 +6,7 @@ This plugin teaches Claude Code to save memories proactively via the AI Memory B
 
 - **SKILL.md** — Behavioral instructions loaded by Claude Code that describe when and how to save memories (triggers, format, importance calibration, anti-patterns).
 - **Hooks** — Shell scripts that fire at session start, session stop, and after context compaction to remind the agent to call the appropriate MCP tools.
-- **settings.json** — Hook configuration for the Claude Code harness.
+- **settings.json** — Reference template for hook configuration. Adapt the event names and paths to match your Claude Code version (e.g. `PreToolUse`, `PostToolUse`, `Stop`).
 
 ## Setup
 
@@ -22,7 +22,7 @@ Copy (or symlink) the plugin directory into your project:
 cp -r plugin/claude-code /path/to/your-project/.claude/plugins/memory-brain
 ```
 
-Or merge the hook configuration from `settings.json` into your existing `.claude/settings.json`.
+Or merge the hook configuration from `settings.json` into your existing `.claude/settings.json`. Note that `settings.json` is a reference template — hook event names and structure may vary between Claude Code versions, so adapt it to your setup.
 
 ### 3. Add the SKILL.md
 

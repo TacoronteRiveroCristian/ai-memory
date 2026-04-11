@@ -9,7 +9,6 @@ def test_server_health_includes_protocol_readiness(brain_client):
 
 def test_proactive_protocol_constant_exists():
     """Verify the PROACTIVE_MEMORY_PROTOCOL constant is importable and non-empty."""
-    import importlib
     import sys
     from pathlib import Path
 

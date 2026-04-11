@@ -152,6 +152,8 @@ async def _oauth_not_supported():
 async def _unhandled_exception_handler(request: Request, exc: Exception):
     logger.exception("Unhandled exception %s %s", request.method, request.url.path)
     return JSONResponse(status_code=500, content={"detail": "internal_error"})
+
+
 PROACTIVE_MEMORY_PROTOCOL = """\
 === PROACTIVE MEMORY PROTOCOL ===
 
@@ -161,16 +163,16 @@ to be asked. Your memories persist across sessions and benefit all agents.
 ── TRIGGERS ──────────────────────────────────────────────────────────
 Save immediately when any of these occur:
 
-| Event                         | Action                                    |
-|-------------------------------|-------------------------------------------|
-| Decision made                 | store_decision                             |
-| Bug / error found             | store_error                                |
-| Pattern / insight discovered  | store_memory  type=observation             |
-| Architecture discussed        | store_memory  type=decision                |
-| Task state changes            | update_task_state                          |
-| Error resolved                | store_error  (with resolution)             |
-| Cross-project connection      | bridge_projects                            |
-| Memories relate               | link_memories                              |
+| Event                         | Action                                                                  |
+|-------------------------------|-------------------------------------------------------------------------|
+| Decision made                 | store_decision(title, decision, project, rationale, alternatives, tags) |
+| Bug / error found             | store_error(error_description, solution, project, error_signature, tags)|
+| Pattern / insight discovered  | store_memory(content, project, memory_type="observation", tags)         |
+| Architecture discussed        | store_memory(content, project, memory_type="architecture", tags)        |
+| Task state changes            | update_task_state(task_title, project, new_state, details)              |
+| Error resolved                | store_error(error_description, solution, project, error_signature, tags)|
+| Cross-project connection      | bridge_projects(project, related_project, reason)                       |
+| Memories relate               | link_memories(source_memory_id, target_memory_id, relation_type, reason)|
 
 ── FORMAT ────────────────────────────────────────────────────────────
 content   : WHAT happened + WHY it matters + CONTEXT (self-contained paragraph)
@@ -180,7 +182,7 @@ importance:
   0.7  — notable (new endpoint, config change)
   0.85 — important (architectural decision, tricky bug)
   0.95 — critical (data-loss risk, security fix, breaking change)
-memory_type: general | decision | error | observation | pattern | task
+memory_type: general | observation | decision | error | architecture | schema | synthesis
 
 ── SESSION LIFECYCLE ─────────────────────────────────────────────────
 START  → call get_project_context to load prior knowledge
