@@ -225,8 +225,8 @@ services:
 
   heartbeat-monitor:
     build:
-      context: .
-      dockerfile: heartbeat-monitor/Dockerfile
+      context: ./heartbeat-monitor
+      dockerfile: Dockerfile
     container_name: ai-memory-heartbeat-monitor
     restart: unless-stopped
     networks:
