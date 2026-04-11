@@ -20,9 +20,11 @@ def seeded_demo_dataset(brain_client):
 
 
 def test_demo_projects_appear_in_global_facets(seeded_demo_dataset, brain_client):
-    facets = brain_client.graph_facets()
-    project_names = {item["project"] for item in facets["projects"]}
-    assert set(seeded_demo_dataset["project_names"]).issubset(project_names)
+    # Check each demo project individually to avoid LIMIT 100 cap in global facets
+    for proj in seeded_demo_dataset["project_names"]:
+        facets = brain_client.graph_facets(project=proj)
+        project_names = {item["project"] for item in facets["projects"]}
+        assert proj in project_names, f"Demo project {proj} not found in facets"
 
 
 def test_demo_project_facets_expose_expected_types_and_shared_tags(seeded_demo_dataset, brain_client):
