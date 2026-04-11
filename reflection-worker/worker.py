@@ -918,7 +918,10 @@ async def resolve_contradictions(conn: asyncpg.Connection) -> int:
                     uuid.UUID(mem_a_id),
                 )
             elif res_type == "synthesis":
+                reasoning = resolution.get("reasoning", "")
                 synth_content = f"SYNTHESIS: {str(mem_a['summary'])[:200]} / {str(mem_b['summary'])[:200]}"
+                if reasoning:
+                    synth_content = f"{synth_content}\nReasoning: {reasoning}"
                 project_name = await conn.fetchval(
                     "SELECT p.name FROM memory_log ml JOIN projects p ON p.id = ml.project_id WHERE ml.id = $1::uuid",
                     uuid.UUID(mem_a_id),
@@ -967,12 +970,12 @@ async def resolve_contradictions(conn: asyncpg.Connection) -> int:
                                 cq_id,
                                 uuid.UUID(synth_id),
                             )
-                        # Proportional degradation of both originals
-                        for orig_id in (mem_a_id, mem_b_id):
-                            await conn.execute(
-                                "UPDATE memory_log SET stability_score = GREATEST(0.05, stability_score * 0.5) WHERE id = $1::uuid",
-                                uuid.UUID(orig_id),
-                            )
+                            # Proportional degradation of both originals
+                            for orig_id in (mem_a_id, mem_b_id):
+                                await conn.execute(
+                                    "UPDATE memory_log SET stability_score = GREATEST(0.05, stability_score * 0.5) WHERE id = $1::uuid",
+                                    uuid.UUID(orig_id),
+                                )
                     except Exception as exc:
                         logger.debug("Error creando síntesis: %s", exc)
             elif res_type == "conditional":
@@ -981,7 +984,7 @@ async def resolve_contradictions(conn: asyncpg.Connection) -> int:
                     "SELECT p.name FROM memory_log ml JOIN projects p ON p.id = ml.project_id WHERE ml.id = $1::uuid",
                     uuid.UUID(mem_a_id),
                 )
-                if project_name:
+                if project_name and condition_text:
                     try:
                         resp = await api_call("POST", "/api/memories", {
                             "content": cond_content,
@@ -1131,28 +1134,26 @@ async def apply_adaptive_myelin_decay(conn) -> int:
 
     decay_rate = 0.01 / (1 + 0.3 * reinforcement_count)
     """
-    rows = await conn.fetch("""
-        SELECT id, myelin_score, reinforcement_count
-        FROM memory_relations
-        WHERE myelin_score > 0
-          AND last_activated_at < NOW() - INTERVAL '48 hours'
-    """)
-    decayed = 0
-    base_decay = 0.01
-    for row in rows:
-        reinforcement = int(row["reinforcement_count"] or 0)
-        effective_decay = base_decay / (1.0 + 0.3 * reinforcement)
-        new_score = max(0.0, float(row["myelin_score"]) - effective_decay)
-        await conn.execute(
-            "UPDATE memory_relations SET myelin_score = $2, myelin_last_updated = NOW() WHERE id = $1",
-            row["id"], new_score,
+    result = await conn.execute("""
+        WITH decay_calc AS (
+            SELECT id,
+                   GREATEST(0.0, myelin_score - (0.01 / (1.0 + 0.3 * COALESCE(reinforcement_count, 0)))) AS new_score
+            FROM memory_relations
+            WHERE myelin_score > 0
+              AND last_activated_at < NOW() - INTERVAL '48 hours'
         )
-        if new_score <= 0.0:
-            await conn.execute(
-                "UPDATE memory_relations SET active = FALSE WHERE id = $1",
-                row["id"],
-            )
-        decayed += 1
+        UPDATE memory_relations mr
+        SET myelin_score = dc.new_score, myelin_last_updated = NOW()
+        FROM decay_calc dc
+        WHERE mr.id = dc.id
+    """)
+    decayed = int(result.split()[-1]) if result else 0
+    # Deactivate relations that hit zero
+    await conn.execute("""
+        UPDATE memory_relations SET active = FALSE
+        WHERE myelin_score <= 0 AND myelin_last_updated < NOW() - INTERVAL '7 days'
+          AND myelin_score IS NOT NULL
+    """)
     return decayed
 
 
@@ -1257,7 +1258,7 @@ async def cleanup_orphan_relations(conn: asyncpg.Connection) -> int:
     result = await conn.execute(
         """
         UPDATE memory_relations mr
-        SET active = FALSE
+        SET active = FALSE, updated_at = NOW()
         FROM memory_log src, memory_log dst
         WHERE mr.source_memory_id = src.id
           AND mr.target_memory_id = dst.id
@@ -1283,6 +1284,32 @@ async def expire_stale_candidates(conn: asyncpg.Connection) -> int:
     return int(result.split()[-1]) if result else 0
 
 
+async def strengthen_cross_project_myelin(conn: asyncpg.Connection) -> int:
+    """[L3] NREM: strengthen myelin for cross-project relations with co-activated endpoints.
+
+    Finds relations where both source and target memories were accessed within 1 hour
+    of each other in the last 24 hours. Increments myelin_score by 0.03, capped at
+    min(1.0, 0.5 + 0.05 * reinforcement_count).
+    """
+    result = await conn.execute("""
+        UPDATE memory_relations mr
+        SET myelin_score = LEAST(
+                LEAST(1.0, 0.5 + 0.05 * COALESCE(mr.reinforcement_count, 0)),
+                COALESCE(mr.myelin_score, 0.0) + 0.03
+            ),
+            myelin_last_updated = NOW()
+        FROM memory_log src, memory_log dst
+        WHERE mr.source_memory_id = src.id
+          AND mr.target_memory_id = dst.id
+          AND src.project_id <> dst.project_id
+          AND src.last_accessed_at > NOW() - INTERVAL '24 hours'
+          AND dst.last_accessed_at > NOW() - INTERVAL '24 hours'
+          AND ABS(EXTRACT(EPOCH FROM (src.last_accessed_at - dst.last_accessed_at))) < 3600
+          AND mr.active = TRUE
+    """)
+    return int(result.split()[-1]) if result else 0
+
+
 async def run_nrem_phase(conn: asyncpg.Connection, run_id, project_names: list[str]) -> dict:
     """[L3] NREM phase — Strengthen & Abstract.
 
@@ -1299,6 +1326,7 @@ async def run_nrem_phase(conn: asyncpg.Connection, run_id, project_names: list[s
         "candidates_promoted": 0,
         "candidates_rejected": 0,
         "clusters_reinforced": 0,
+        "coactivation_strengthened": 0,
         "contradictions_resolved": 0,
     }
     # 1. Schema extraction
@@ -1325,6 +1353,11 @@ async def run_nrem_phase(conn: asyncpg.Connection, run_id, project_names: list[s
     await update_heartbeat()
     nrem_stats["clusters_reinforced"] = await reinforce_hot_clusters(conn)
 
+    # 4b. Cross-project co-activation myelin strengthening
+    await update_heartbeat()
+    coactivated = await strengthen_cross_project_myelin(conn)
+    nrem_stats["coactivation_strengthened"] = coactivated
+
     # 5. Contradiction resolution
     await update_heartbeat()
     nrem_stats["contradictions_resolved"] = await resolve_contradictions(conn)
@@ -1332,7 +1365,7 @@ async def run_nrem_phase(conn: asyncpg.Connection, run_id, project_names: list[s
     return nrem_stats
 
 
-async def run_rem_phase(conn: asyncpg.Connection, project_names: list[str]) -> dict:
+async def run_rem_phase(conn: asyncpg.Connection) -> dict:
     """[L3] REM phase — Prune & Clean.
 
     1. Cold memory pruning (improved criteria)
@@ -1417,7 +1450,7 @@ async def handle_deep_sleep():
                 )
 
                 # REM phase — prune & clean
-                rem_stats = await run_rem_phase(conn, project_names)
+                rem_stats = await run_rem_phase(conn)
                 logger.info(
                     "[L3] REM complete: pruned=%d orphaned=%d myelin_decayed=%d "
                     "permeability_decayed=%d candidates_expired=%d",
