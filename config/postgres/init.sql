@@ -295,6 +295,17 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+-- [L3] Add NREM/REM stats columns to sleep_cycles
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'sleep_cycles' AND column_name = 'nrem_stats') THEN
+        ALTER TABLE sleep_cycles ADD COLUMN nrem_stats JSONB DEFAULT '{}'::jsonb;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'sleep_cycles' AND column_name = 'rem_stats') THEN
+        ALTER TABLE sleep_cycles ADD COLUMN rem_stats JSONB DEFAULT '{}'::jsonb;
+    END IF;
+END $$;
+
 DROP TRIGGER IF EXISTS update_projects_updated_at ON projects;
 CREATE TRIGGER update_projects_updated_at BEFORE UPDATE ON projects
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();
