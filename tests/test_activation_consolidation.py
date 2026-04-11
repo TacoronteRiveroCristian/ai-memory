@@ -13,7 +13,7 @@ def test_plasticity_session_includes_consolidation_key(brain_client, unique_proj
         content="FastAPI server handles all memory CRUD operations",
         project=project,
         memory_type="observation",
-        tags=["fastapi", "server"],
+        tags="fastapi,server",
         importance=0.85,
         agent_id="pytest",
     )
@@ -21,7 +21,7 @@ def test_plasticity_session_includes_consolidation_key(brain_client, unique_proj
         content="Qdrant provides vector similarity search for embeddings",
         project=project,
         memory_type="observation",
-        tags=["qdrant", "search"],
+        tags="qdrant,search",
         importance=0.85,
         agent_id="pytest",
     )
@@ -29,7 +29,7 @@ def test_plasticity_session_includes_consolidation_key(brain_client, unique_proj
         content="Redis caches embeddings to reduce OpenAI API calls",
         project=project,
         memory_type="decision",
-        tags=["redis", "cache"],
+        tags="redis,cache",
         importance=0.85,
         agent_id="pytest",
     )
