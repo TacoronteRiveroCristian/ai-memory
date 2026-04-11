@@ -121,6 +121,7 @@ _HIGH_AROUSAL_KEYWORDS = frozenset({
     "revelation",
 })
 AI_MEMORY_TEST_MODE = os.environ.get("AI_MEMORY_TEST_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
+HEARTBEAT_ENABLED = os.environ.get("HEARTBEAT_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}
 AI_MEMORY_TEST_NOW = os.environ.get("AI_MEMORY_TEST_NOW", "").strip()
 SESSION_MEM0_TIMEOUT_SECONDS = min(MEM0_INGEST_TIMEOUT_SECONDS, 5.0) if AI_MEMORY_TEST_MODE else MEM0_INGEST_TIMEOUT_SECONDS
 EMBEDDING_CACHE_NAMESPACE = "embed:test:v2" if AI_MEMORY_TEST_MODE else f"embed:live:{EMBEDDING_MODEL}"
@@ -4379,6 +4380,137 @@ async def api_test_clock(payload: TestClockRequest):
     except Exception as exc:
         logger.exception("api_test_clock fallo")
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+async def queue_manual_deep_sleep() -> dict[str, Any]:
+    if not pg_pool:
+        return {"error": "postgres_unavailable"}
+    async with pg_pool.acquire() as conn:
+        existing = await conn.fetchrow(
+            """
+            SELECT id, status
+            FROM manual_deep_sleep_runs
+            WHERE status IN ('pending', 'running')
+            ORDER BY requested_at DESC
+            LIMIT 1
+            """
+        )
+        if existing:
+            return {"run_id": str(existing["id"]), "queued": False, "status": existing["status"]}
+        run_id = await conn.fetchval(
+            "INSERT INTO manual_deep_sleep_runs (status) VALUES ('pending') RETURNING id"
+        )
+    return {"run_id": str(run_id), "queued": True, "status": "pending"}
+
+
+@app.post("/api/test/trigger-deep-sleep")
+async def api_trigger_deep_sleep():
+    if not AI_MEMORY_TEST_MODE and not HEARTBEAT_ENABLED:
+        raise HTTPException(status_code=403, detail="Requires AI_MEMORY_TEST_MODE or HEARTBEAT_ENABLED")
+    result = await queue_manual_deep_sleep()
+    if result.get("error"):
+        raise HTTPException(status_code=500, detail=result["error"])
+    return result
+
+
+@app.get("/api/test/deep-sleep-status/{run_id}")
+async def api_deep_sleep_status(run_id: str):
+    if not pg_pool:
+        raise HTTPException(status_code=503, detail="postgres_unavailable")
+    async with pg_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT id, status, stats, requested_at, started_at, completed_at FROM manual_deep_sleep_runs WHERE id = $1",
+            uuid.UUID(run_id),
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return {
+        "run_id": str(row["id"]),
+        "status": row["status"],
+        "stats": row["stats"],
+        "requested_at": row["requested_at"].isoformat() if row["requested_at"] else None,
+        "started_at": row["started_at"].isoformat() if row["started_at"] else None,
+        "completed_at": row["completed_at"].isoformat() if row["completed_at"] else None,
+    }
+
+
+@app.post("/api/heartbeat/report")
+async def api_heartbeat_report(request: Request):
+    body = await request.json()
+    if not pg_pool:
+        raise HTTPException(status_code=503, detail="postgres_unavailable")
+    async with pg_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO heartbeat_cycles (cycle_id, mode, phase, injected_memories, checks, passed, failed, completed_at)
+            VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, CASE WHEN $3 = 'completed' THEN NOW() ELSE NULL END)
+            ON CONFLICT (cycle_id) DO UPDATE SET
+                phase = EXCLUDED.phase,
+                injected_memories = EXCLUDED.injected_memories,
+                checks = EXCLUDED.checks,
+                passed = EXCLUDED.passed,
+                failed = EXCLUDED.failed,
+                completed_at = CASE WHEN EXCLUDED.phase = 'completed' THEN NOW() ELSE heartbeat_cycles.completed_at END
+            """,
+            body["cycle_id"],
+            body["mode"],
+            body["phase"],
+            body.get("injected_memories", 0),
+            json.dumps(body.get("checks", [])),
+            body.get("passed", 0),
+            body.get("failed", 0),
+        )
+    return {"stored": True}
+
+
+@app.get("/api/heartbeat/status")
+async def api_heartbeat_status():
+    if not pg_pool:
+        raise HTTPException(status_code=503, detail="postgres_unavailable")
+    async with pg_pool.acquire() as conn:
+        cycles = await conn.fetch(
+            """
+            SELECT cycle_id, mode, phase, injected_memories, checks, passed, failed, created_at, completed_at
+            FROM heartbeat_cycles
+            WHERE phase = 'completed'
+            ORDER BY created_at DESC
+            LIMIT 20
+            """
+        )
+    total_passed = sum(r["passed"] for r in cycles)
+    total_failed = sum(r["failed"] for r in cycles)
+    total_checks = total_passed + total_failed
+
+    latest = None
+    history = []
+    for i, row in enumerate(cycles):
+        entry = {
+            "cycle_id": row["cycle_id"],
+            "mode": row["mode"],
+            "injected_memories": row["injected_memories"],
+            "checks": json.loads(row["checks"]) if isinstance(row["checks"], str) else row["checks"],
+            "passed": row["passed"],
+            "failed": row["failed"],
+            "at": row["completed_at"].isoformat() if row["completed_at"] else row["created_at"].isoformat(),
+        }
+        if i == 0:
+            latest = entry
+        else:
+            history.append({"cycle_id": entry["cycle_id"], "at": entry["at"], "passed": entry["passed"], "failed": entry["failed"]})
+
+    return {
+        "enabled": HEARTBEAT_ENABLED,
+        "cycles_completed": len(cycles),
+        "last_cycle_at": latest["at"] if latest else None,
+        "checks_summary": {
+            "total": total_checks,
+            "passed": total_passed,
+            "failed": total_failed,
+            "pass_rate": round(total_passed / total_checks, 3) if total_checks > 0 else 0,
+        },
+        "latest_cycle": latest,
+        "history": history,
+    }
 
 
 @app.post("/api/reflections/run")

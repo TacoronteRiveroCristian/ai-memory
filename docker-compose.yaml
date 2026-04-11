@@ -151,6 +151,7 @@ services:
       LOG_LEVEL: INFO
       AI_MEMORY_TEST_MODE: ${AI_MEMORY_TEST_MODE:-false}
       AI_MEMORY_TEST_NOW: ${AI_MEMORY_TEST_NOW:-}
+      HEARTBEAT_ENABLED: ${HEARTBEAT_ENABLED:-false}
       WORKER_HEARTBEAT_KEY: reflection_worker:heartbeat
       WORKER_HEARTBEAT_MAX_AGE_SECONDS: ${WORKER_HEARTBEAT_TTL_SECONDS:-120}
     depends_on:
@@ -221,6 +222,36 @@ services:
     depends_on:
       api-server:
         condition: service_started
+
+  heartbeat-monitor:
+    build:
+      context: ./heartbeat-monitor
+      dockerfile: Dockerfile
+    container_name: ai-memory-heartbeat-monitor
+    restart: unless-stopped
+    networks:
+      - backend
+    environment:
+      AI_MEMORY_BASE_URL: http://api-server:8050
+      MEMORY_API_KEY: ${MEMORY_API_KEY}
+      HEARTBEAT_MODE: ${HEARTBEAT_MODE:-accelerated}
+      HEARTBEAT_INJECT_INTERVAL: ${HEARTBEAT_INJECT_INTERVAL:-30}
+      HEARTBEAT_SLEEP_INTERVAL: ${HEARTBEAT_SLEEP_INTERVAL:-300}
+      HEARTBEAT_VERIFY_INTERVAL: ${HEARTBEAT_VERIFY_INTERVAL:-120}
+      HEARTBEAT_ENABLED: "true"
+    depends_on:
+      api-server:
+        condition: service_healthy
+      reflection-worker:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "[ $$(( $$(date +%s) - $$(stat -c %Y /tmp/heartbeat-alive 2>/dev/null || echo 0) )) -lt 300 ]"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    profiles:
+      - heartbeat
 
 networks:
   backend:

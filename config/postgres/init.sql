@@ -310,3 +310,27 @@ CREATE TRIGGER update_memory_relations_updated_at BEFORE UPDATE ON memory_relati
 DROP TRIGGER IF EXISTS update_project_bridges_updated_at ON project_bridges;
 CREATE TRIGGER update_project_bridges_updated_at BEFORE UPDATE ON project_bridges
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+-- [9] Manual deep sleep trigger queue
+CREATE TABLE IF NOT EXISTS manual_deep_sleep_runs (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    status VARCHAR(20) NOT NULL DEFAULT 'pending',
+    requested_at TIMESTAMPTZ DEFAULT NOW(),
+    started_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+    stats JSONB
+);
+
+-- [10] Heartbeat monitor cycle history
+CREATE TABLE IF NOT EXISTS heartbeat_cycles (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    cycle_id TEXT UNIQUE NOT NULL,
+    mode TEXT NOT NULL,
+    phase TEXT NOT NULL DEFAULT 'injecting',
+    injected_memories INT DEFAULT 0,
+    checks JSONB DEFAULT '[]'::jsonb,
+    passed INT DEFAULT 0,
+    failed INT DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    completed_at TIMESTAMPTZ
+);

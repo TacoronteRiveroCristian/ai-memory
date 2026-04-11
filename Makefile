@@ -5,7 +5,7 @@ DOCKER_COMPOSE ?= docker compose
 TEST_NOW ?= 2030-01-01T00:00:00+00:00
 KEEP_STACK_UP ?= false
 
-.PHONY: dev-deps health smoke stack-up stack-down stack-test-up test-deterministic eval-deterministic brain-check demo-up demo-seed demo-check demo-down
+.PHONY: dev-deps health smoke stack-up stack-down stack-test-up test-deterministic eval-deterministic brain-check demo-up demo-seed demo-check demo-down heartbeat-fast heartbeat-prod heartbeat-status heartbeat-stop
 
 dev-deps:
 	$(PYTHON) -m pip install -r requirements-dev.txt
@@ -46,3 +46,15 @@ demo-check:
 
 demo-down:
 	./scripts/demo_compose.sh down --remove-orphans
+
+heartbeat-fast:
+	HEARTBEAT_ENABLED=true $(DOCKER_COMPOSE) --profile heartbeat up -d --build
+
+heartbeat-prod:
+	HEARTBEAT_ENABLED=true HEARTBEAT_MODE=production HEARTBEAT_INJECT_INTERVAL=3600 HEARTBEAT_SLEEP_INTERVAL=86400 HEARTBEAT_VERIFY_INTERVAL=7200 $(DOCKER_COMPOSE) --profile heartbeat up -d --build
+
+heartbeat-status:
+	@SANITIZED_ENV=$$(mktemp); tr -d '\r' < .env > $$SANITIZED_ENV; source $$SANITIZED_ENV && curl -s -H "X-API-Key: $$MEMORY_API_KEY" http://127.0.0.1:8050/api/heartbeat/status | $(PYTHON) -m json.tool; rm -f $$SANITIZED_ENV
+
+heartbeat-stop:
+	$(DOCKER_COMPOSE) --profile heartbeat stop heartbeat-monitor

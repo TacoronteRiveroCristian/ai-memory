@@ -1506,6 +1506,75 @@ async def handle_deep_sleep():
             await conn.execute("SELECT pg_advisory_unlock($1)", ADVISORY_LOCK_KEY + 1)
 
 
+async def handle_manual_deep_sleep():
+    """Check for manually triggered deep sleep requests and execute them."""
+    if not pg_pool:
+        return
+    async with pg_pool.acquire() as conn:
+        locked = await conn.fetchval("SELECT pg_try_advisory_lock($1)", ADVISORY_LOCK_KEY + 1)
+        if not locked:
+            return
+        try:
+            row = await conn.fetchrow(
+                """
+                SELECT id FROM manual_deep_sleep_runs
+                WHERE status = 'pending'
+                ORDER BY requested_at ASC
+                LIMIT 1
+                """
+            )
+            if not row:
+                return
+            run_id = row["id"]
+            await conn.execute(
+                "UPDATE manual_deep_sleep_runs SET status = 'running', started_at = NOW() WHERE id = $1",
+                run_id,
+            )
+            logger.info("[L3] Manual deep sleep triggered (run_id=%s)", run_id)
+
+            project_names = [
+                str(r["name"]) for r in await conn.fetch(
+                    "SELECT DISTINCT p.name FROM projects p JOIN memory_log m ON m.project_id = p.id"
+                )
+            ]
+
+            nrem_stats = {}
+            rem_stats = {}
+            error_text = None
+            try:
+                nrem_stats = await run_nrem_phase(conn, run_id, project_names)
+                rem_stats = await run_rem_phase(conn)
+            except Exception as exc:
+                logger.exception("[L3] Manual deep sleep failed")
+                error_text = str(exc)[:2000]
+
+            try:
+                nrem_cid = await record_sleep_cycle(conn, "nrem", "manual_trigger", project_names, {})
+                await complete_sleep_cycle(conn, nrem_cid, nrem_stats)
+            except Exception:
+                logger.debug("Failed to record manual NREM cycle")
+            try:
+                rem_cid = await record_sleep_cycle(conn, "rem", "manual_trigger", project_names, {})
+                await complete_sleep_cycle(conn, rem_cid, rem_stats)
+            except Exception:
+                logger.debug("Failed to record manual REM cycle")
+
+            combined = {**nrem_stats, **rem_stats}
+            await conn.execute(
+                """
+                UPDATE manual_deep_sleep_runs
+                SET status = $2, completed_at = NOW(), stats = $3::jsonb
+                WHERE id = $1
+                """,
+                run_id,
+                "failed" if error_text else "completed",
+                json.dumps(combined),
+            )
+            logger.info("[L3] Manual deep sleep completed (run_id=%s)", run_id)
+        finally:
+            await conn.execute("SELECT pg_advisory_unlock($1)", ADVISORY_LOCK_KEY + 1)
+
+
 async def run_loop():
     while True:
         try:
@@ -1513,6 +1582,7 @@ async def run_loop():
             await handle_manual_runs()
             await handle_scheduled_run()
             await handle_deep_sleep()
+            await handle_manual_deep_sleep()
         except Exception:
             logger.exception("Bucle principal del reflection worker fallo")
         await asyncio.sleep(REFLECTION_POLL_INTERVAL)
