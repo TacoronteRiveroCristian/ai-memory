@@ -76,4 +76,4 @@ def test_plasticity_session_returns_all_fields(brain_client, unique_project_name
 def test_brain_health_endpoint(brain_client):
     """Brain health endpoint returns status."""
     health = brain_client.brain_health()
-    assert "status" in health
+    assert "overall_health" in health
