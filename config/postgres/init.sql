@@ -283,6 +283,7 @@ CREATE INDEX IF NOT EXISTS idx_project_bridges_related ON project_bridges(relate
 CREATE INDEX IF NOT EXISTS idx_memory_log_arousal ON memory_log(project_id, arousal DESC) WHERE arousal > 0.6;
 CREATE INDEX IF NOT EXISTS idx_memory_log_novelty ON memory_log(project_id, novelty_score DESC) WHERE novelty_score > 0.6;
 CREATE INDEX IF NOT EXISTS idx_contradiction_pending ON contradiction_queue(resolution_status) WHERE resolution_status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_contradiction_suspected ON contradiction_queue(resolution_status) WHERE resolution_status = 'suspected';
 CREATE INDEX IF NOT EXISTS idx_schema_sources_schema ON schema_sources(schema_memory_id);
 CREATE INDEX IF NOT EXISTS idx_deep_sleep_runs_status ON deep_sleep_runs(status, started_at DESC);
 

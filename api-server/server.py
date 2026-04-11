@@ -41,6 +41,7 @@ from sensory_cortex import (
     canonicalize_tags as sc_canonicalize_tags,
     classify_synapse_cascade,
     compute_combined_score,
+    compute_contradiction_score,
     emotional_proximity as sc_emotional_proximity,
     importance_attraction as sc_importance_attraction,
     temporal_proximity as sc_temporal_proximity,
@@ -1885,6 +1886,65 @@ async def infer_relations_from_candidates(
             }
 
             result = classify_synapse_cascade(signals, cross_project)
+
+            # --- Proactive contradiction detection ---
+            source_valence = float(source_memory.get("valence", 0.0) or 0.0)
+            candidate_valence = float(candidate.get("valence", 0.0) or 0.0)
+            source_keyphrases = source_memory.get("keyphrases") or source_memory.get("tags") or []
+            candidate_keyphrases = candidate.get("keyphrases") or candidate.get("tags") or []
+            # Compute days apart
+            _ca = source_memory.get("created_at")
+            _cb = candidate.get("created_at")
+            _days_apart = 0.0
+            if _ca and _cb:
+                try:
+                    _ta = _ca if not isinstance(_ca, str) else datetime.fromisoformat(_ca.replace("Z", "+00:00"))
+                    _tb = _cb if not isinstance(_cb, str) else datetime.fromisoformat(_cb.replace("Z", "+00:00"))
+                    _days_apart = abs((_ta - _tb).total_seconds()) / 86400.0
+                except Exception:
+                    pass
+            contradiction_score = compute_contradiction_score(
+                signals, source_text, candidate_text,
+                valence_a=source_valence, valence_b=candidate_valence,
+                keyphrases_a=list(source_keyphrases), keyphrases_b=list(candidate_keyphrases),
+                days_apart=_days_apart,
+            )
+
+            if contradiction_score > 0.6:
+                # Strong contradiction — create contradicts relation immediately
+                relation_data = await upsert_memory_relation(
+                    source_memory_id=source_memory["id"],
+                    target_memory_id=candidate["id"],
+                    relation_type="contradicts",
+                    weight=round(contradiction_score, 4),
+                    origin=origin,
+                    evidence={
+                        "reason": "proactive_contradiction_detected",
+                        "contradiction_score": contradiction_score,
+                        "signals": signals,
+                        "source_project": source_memory.get("project"),
+                        "target_project": candidate["project"],
+                    },
+                )
+                created.append(relation_data)
+                continue
+            elif contradiction_score >= 0.4:
+                # Suspected contradiction — enqueue for review
+                if pg_pool:
+                    try:
+                        async with pg_pool.acquire() as conn:
+                            await conn.execute(
+                                """
+                                INSERT INTO contradiction_queue (memory_a_id, memory_b_id, resolution_status)
+                                VALUES ($1::uuid, $2::uuid, 'suspected')
+                                ON CONFLICT (memory_a_id, memory_b_id) DO NOTHING
+                                """,
+                                uuid.UUID(source_memory["id"]),
+                                uuid.UUID(candidate["id"]),
+                            )
+                    except Exception as exc:
+                        logger.debug("Failed to enqueue suspected contradiction: %s", exc)
+
             if result is None:
                 continue
 
@@ -1930,6 +1990,7 @@ async def infer_relations_from_candidates(
                     "reason": result["reason"],
                     "tier": result["tier"],
                     "signals": signals,
+                    "contradiction_score": contradiction_score,
                     "source_project": source_memory.get("project"),
                     "target_project": candidate["project"],
                 },
@@ -2713,6 +2774,86 @@ async def get_graph_facets(project: Optional[str] = None) -> dict[str, Any]:
     }
 
 
+ACTIVATION_CONSOLIDATION_THRESHOLD = 0.3
+CONSOLIDATION_FACTOR = 0.15
+
+
+async def consolidate_activation(project_name: str) -> int:
+    """Consolidate spreading activation from Redis into the DB.
+
+    Scans Redis keys ``activation_propagation:*``, and for each memory whose
+    accumulated energy meets the threshold, updates activation_score, access_count,
+    and last_accessed_at in the database (filtered by *project_name*).
+    Returns the number of consolidated memories.
+    """
+    try:
+        if not redis_client or not pg_pool:
+            return 0
+
+        keys: list[str] = []
+        async for key in redis_client.scan_iter(match="activation_propagation:*", count=200):
+            keys.append(key if isinstance(key, str) else key.decode())
+
+        if not keys:
+            return 0
+
+        values = await redis_client.mget(keys)
+
+        # Build {memory_id: energy} for entries above noise threshold
+        candidates: dict[str, float] = {}
+        for key, val in zip(keys, values):
+            if val is None:
+                continue
+            try:
+                energy = float(val)
+            except (TypeError, ValueError):
+                continue
+            if energy < 0.1:
+                continue
+            memory_id = key.split(":", 1)[1] if ":" in key else key
+            candidates[memory_id] = energy
+
+        if not candidates:
+            return 0
+
+        consolidated = 0
+        current_time = now_utc()
+        async with pg_pool.acquire() as conn:
+            for memory_id, energy in candidates.items():
+                if energy < ACTIVATION_CONSOLIDATION_THRESHOLD:
+                    continue
+                try:
+                    result = await conn.execute(
+                        """
+                        UPDATE memory_log ml
+                        SET activation_score = LEAST(1.0, COALESCE(ml.activation_score, 0.0) + $1 * $2),
+                            access_count = COALESCE(ml.access_count, 0) + 1,
+                            last_accessed_at = $3::timestamptz
+                        FROM projects p
+                        WHERE p.id = ml.project_id
+                          AND p.name = $4
+                          AND ml.id = $5::uuid
+                        """,
+                        energy,
+                        CONSOLIDATION_FACTOR,
+                        current_time,
+                        project_name,
+                        uuid.UUID(memory_id),
+                    )
+                    if result and result.split()[-1] != "0":
+                        consolidated += 1
+                except Exception as exc:
+                    logger.debug("Failed to consolidate activation for %s: %s", memory_id, exc)
+
+        if consolidated > 0:
+            logger.info("[4] LTP consolidation: %d memories strengthened for project %s", consolidated, project_name)
+
+        return consolidated
+    except Exception as exc:
+        logger.debug("consolidate_activation failed for project %s: %s", project_name, exc)
+        return 0
+
+
 async def apply_session_plasticity(payload: SessionSummaryRequest) -> dict[str, Any]:
     queries = [payload.summary, payload.goal, payload.outcome]
     queries.extend(payload.changes[:4])
@@ -2775,12 +2916,14 @@ async def apply_session_plasticity(payload: SessionSummaryRequest) -> dict[str, 
     decayed = await decay_project_relations(payload.project)
     # [1] Ebbinghaus: decay exponencial de stability_score para memorias no accedidas
     decayed_stability = await decay_memory_stability(payload.project)
+    consolidated = await consolidate_activation(payload.project)
     return {
         "activated_memories": len(selected),
         "reinforced_pairs": reinforced_pairs,
         "expanded_links": expanded_links,
         "decayed_relations": decayed,
         "decayed_stability": decayed_stability,
+        "consolidated_activations": consolidated,
     }
 
 async def mem0_health() -> bool:

@@ -310,3 +310,64 @@ def classify_synapse_cascade(
         }
 
     return None
+
+
+# ---------------------------------------------------------------------------
+# Contradiction Detection
+# ---------------------------------------------------------------------------
+
+CONTRADICTION_PATTERNS: list[tuple[str, str]] = [
+    (r"\bno\s+usar\b", r"\busar\b"),
+    (r"\bevitar\b", r"\bpreferir\b"),
+    (r"\bdeprecated?\b", r"\brecomend(?:ado|ed)\b"),
+    (r"\bremove[dr]?\b", r"\badd(?:ed)?\b"),
+    (r"\bdisable[dr]?\b", r"\benable[dr]?\b"),
+    (r"\bnot?\s+recommend", r"\brecommend"),
+    (r"\banti[_-]?pattern\b", r"\bbest[_-]?practice\b"),
+    (r"\bno\s+(?:es|son|fue)\b.*\b(?:bueno|recomendable|adecuado)\b", r"\b(?:es|son|fue)\b.*\b(?:bueno|recomendable|adecuado)\b"),
+]
+
+
+def compute_contradiction_score(
+    signals: dict[str, float],
+    content_a: str,
+    content_b: str,
+    valence_a: float = 0.0,
+    valence_b: float = 0.0,
+    keyphrases_a: Optional[list[str]] = None,
+    keyphrases_b: Optional[list[str]] = None,
+    days_apart: float = 0.0,
+) -> float:
+    """Score how likely two memories contradict each other. Returns [0, 1]."""
+    score = 0.0
+
+    sem = signals.get("semantic_score", 0.0)
+    lex = signals.get("lexical_overlap", 0.0)
+
+    # 1. Semantic high + lexical low → content diverges despite topic overlap
+    if sem > 0.7 and lex < 0.3:
+        score += 0.30
+    elif sem > 0.5 and lex < 0.2:
+        score += 0.15
+
+    # 2. Valence opposition
+    if valence_a * valence_b < 0:
+        score += 0.25
+
+    # 3. Negation patterns — check both directions
+    pattern_score = 0.0
+    lower_a = content_a.lower()
+    lower_b = content_b.lower()
+    for pat_a, pat_b in CONTRADICTION_PATTERNS:
+        if (re.search(pat_a, lower_a) and re.search(pat_b, lower_b)) or \
+           (re.search(pat_b, lower_a) and re.search(pat_a, lower_b)):
+            pattern_score += 0.10
+    score += min(pattern_score, 0.25)
+
+    # 4. Temporal supersession — same topic revisited much later
+    kp_a = set(keyphrases_a or [])
+    kp_b = set(keyphrases_b or [])
+    if len(kp_a & kp_b) >= 2 and days_apart > 30:
+        score += 0.20
+
+    return round(min(max(score, 0.0), 1.0), 4)
