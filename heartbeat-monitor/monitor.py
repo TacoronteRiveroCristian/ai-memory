@@ -93,6 +93,33 @@ def inject_batch(client: HeartbeatClient, ctx: CycleContext, batch, project: str
         logger.info("  Injected %s: %s", key, result["memory_id"][:8])
 
 
+def _search_to_activate(client: HeartbeatClient, project: str, query: str, scope: str = "project"):
+    """Fire a search to set last_accessed_at and boost stability on matching memories."""
+    try:
+        client.structured_search(query=query, project=project, limit=5, scope=scope, register_access=True)
+        logger.info("  Search activation: '%s' in %s (scope=%s)", query[:40], project, scope)
+    except Exception as exc:
+        logger.debug("  Search activation failed: %s", exc)
+
+
+def _trigger_ebbinghaus_decay(client: HeartbeatClient, ctx: CycleContext):
+    """Trigger Ebbinghaus decay directly (without accessing memories)."""
+    try:
+        result = client.trigger_decay(ctx.project_a)
+        logger.info("  Ebbinghaus decay triggered: %d memories decayed", result.get("decayed", 0))
+    except Exception as exc:
+        logger.debug("  Ebbinghaus decay trigger failed: %s", exc)
+
+
+def _is_test_mode(client: HeartbeatClient) -> bool:
+    """Check if the API server is running in test mode."""
+    try:
+        health = client.get("/health")
+        return health.get("test_mode", False)
+    except Exception:
+        return False
+
+
 def phase_inject(client: HeartbeatClient, ctx: CycleContext):
     """Phase 1: Inject all trap batches."""
     logger.info("=== PHASE 1: INJECT (cycle %s) ===", ctx.cycle_id)
@@ -157,12 +184,21 @@ def phase_inject(client: HeartbeatClient, ctx: CycleContext):
     logger.info("Batch 5: Cold memory (will not be accessed)")
     inject_batch(client, ctx, BATCH_5_COLD, ctx.project_a, "cold")
 
+    # Take initial snapshots BEFORE search activation
+    # (so stability_increased can detect the boost from search)
     logger.info("Taking initial snapshots...")
     for key, mid in ctx.memory_ids.items():
         try:
             ctx.initial_snapshots[key] = take_memory_snapshot(client, mid)
         except Exception:
             logger.debug("  Snapshot failed for %s", key)
+
+    # Search cluster and cross-project memories to set last_accessed_at
+    # and boost stability (needed for myelin strengthening and stability check)
+    _search_to_activate(client, ctx.project_a, "inversores Modbus monitorización")
+    _search_to_activate(client, ctx.project_b, "mantenimiento predictivo Modbus")
+    # Bridged search to create cross-project access patterns for myelin
+    _search_to_activate(client, ctx.project_a, "mantenimiento predictivo inversores", scope="bridged")
 
     total = len(ctx.memory_ids)
     logger.info("Phase 1 complete: %d memories injected", total)
@@ -252,7 +288,8 @@ def phase_verify(client: HeartbeatClient, ctx: CycleContext, previous_health: fl
 def run_cycle(client: HeartbeatClient, previous_health: float) -> tuple[list[CheckResult], float]:
     """Execute one full heartbeat cycle: inject -> sleep -> verify."""
     ctx = CycleContext()
-    logger.info("Starting heartbeat cycle %s (mode=%s)", ctx.cycle_id, MODE)
+    test_mode = _is_test_mode(client)
+    logger.info("Starting heartbeat cycle %s (mode=%s, test_mode=%s)", ctx.cycle_id, MODE, test_mode)
 
     phase_inject(client, ctx)
 
@@ -266,6 +303,28 @@ def run_cycle(client: HeartbeatClient, previous_health: float) -> tuple[list[Che
 
     phase_sleep(client, ctx)
 
+    # In test mode: take post-sleep snapshots (before clock advance) for stability check,
+    # then advance clock and trigger Ebbinghaus decay for cold memory check
+    if test_mode:
+        # Snapshot after deep sleep but before decay — captures stability boost from search
+        logger.info("Taking post-sleep snapshots for stability comparison...")
+        for key in ("cluster_0", "cluster_1", "cluster_2"):
+            mid = ctx.memory_ids.get(key)
+            if mid:
+                try:
+                    ctx.post_sleep_snapshots[key] = take_memory_snapshot(client, mid)
+                except Exception:
+                    pass
+
+        try:
+            from datetime import datetime, timedelta, timezone
+            future = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+            client.set_test_clock(future)
+            logger.info("Test clock advanced 30 days for Ebbinghaus decay")
+            _trigger_ebbinghaus_decay(client, ctx)
+        except Exception as exc:
+            logger.warning("Failed test clock advance/decay: %s", exc)
+
     logger.info("Waiting %ds before verification...", VERIFY_INTERVAL)
     remaining = VERIFY_INTERVAL
     while remaining > 0:
@@ -275,6 +334,14 @@ def run_cycle(client: HeartbeatClient, previous_health: float) -> tuple[list[Che
         touch_heartbeat()
 
     results = phase_verify(client, ctx, previous_health)
+
+    # Reset test clock after verification
+    if test_mode:
+        try:
+            client.set_test_clock(None)
+            logger.info("Test clock reset")
+        except Exception as exc:
+            logger.warning("Failed to reset test clock: %s", exc)
 
     try:
         current_health = client.brain_health().get("overall_health", 0.5)

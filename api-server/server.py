@@ -4403,6 +4403,18 @@ async def queue_manual_deep_sleep() -> dict[str, Any]:
     return {"run_id": str(run_id), "queued": True, "status": "pending"}
 
 
+@app.post("/api/test/trigger-decay/{project}")
+async def api_trigger_decay(project: str):
+    """Trigger Ebbinghaus decay on a project without accessing memories."""
+    if not AI_MEMORY_TEST_MODE and not HEARTBEAT_ENABLED:
+        raise HTTPException(status_code=403, detail="Requires AI_MEMORY_TEST_MODE or HEARTBEAT_ENABLED")
+    try:
+        decayed = await decay_memory_stability(project)
+        return {"decayed": decayed, "project": project}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @app.post("/api/test/trigger-deep-sleep")
 async def api_trigger_deep_sleep():
     if not AI_MEMORY_TEST_MODE and not HEARTBEAT_ENABLED:

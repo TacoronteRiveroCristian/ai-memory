@@ -64,6 +64,15 @@ class HeartbeatClient:
                 return None
             raise
 
+    def structured_search(self, **kwargs) -> dict[str, Any]:
+        return self.post("/api/search/structured", kwargs)
+
+    def set_test_clock(self, when: Optional[str]) -> dict[str, Any]:
+        return self.post("/api/test/clock", {"now": when})
+
+    def trigger_decay(self, project: str) -> dict[str, Any]:
+        return self.post(f"/api/test/trigger-decay/{project}", {})
+
     def trigger_deep_sleep(self) -> dict[str, Any]:
         return self.post("/api/test/trigger-deep-sleep", {})
 
