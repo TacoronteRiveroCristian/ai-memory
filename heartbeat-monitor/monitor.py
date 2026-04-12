@@ -93,44 +93,20 @@ def inject_batch(client: HeartbeatClient, ctx: CycleContext, batch, project: str
         logger.info("  Injected %s: %s", key, result["memory_id"][:8])
 
 
-def _search_to_activate(client: HeartbeatClient, project: str, query: str):
+def _search_to_activate(client: HeartbeatClient, project: str, query: str, scope: str = "project"):
     """Fire a search to set last_accessed_at and boost stability on matching memories."""
     try:
-        client.structured_search(query=query, project=project, limit=5)
-        logger.info("  Search activation: '%s' in %s", query[:40], project)
+        client.structured_search(query=query, project=project, limit=5, scope=scope, register_access=True)
+        logger.info("  Search activation: '%s' in %s (scope=%s)", query[:40], project, scope)
     except Exception as exc:
         logger.debug("  Search activation failed: %s", exc)
 
 
 def _trigger_ebbinghaus_decay(client: HeartbeatClient, ctx: CycleContext):
-    """Trigger Ebbinghaus decay via plasticity session (uses api-server's now_utc)."""
-    session_id = f"hb-decay-{uuid.uuid4().hex[:8]}"
+    """Trigger Ebbinghaus decay directly (without accessing memories)."""
     try:
-        client.record_session(
-            project=ctx.project_a,
-            agent_id="heartbeat-decay",
-            session_id=session_id,
-            summary="Decay trigger",
-            goal="Trigger Ebbinghaus decay",
-            outcome="Completed",
-            changes=[],
-            decisions=[],
-            errors=[],
-            follow_ups=[],
-        )
-        client.apply_session_plasticity(
-            project=ctx.project_a,
-            agent_id="heartbeat-decay",
-            session_id=session_id,
-            summary="Decay trigger",
-            goal="Trigger Ebbinghaus decay",
-            outcome="Completed",
-            changes=[],
-            decisions=[],
-            errors=[],
-            follow_ups=[],
-        )
-        logger.info("  Ebbinghaus decay triggered via plasticity session")
+        result = client.trigger_decay(ctx.project_a)
+        logger.info("  Ebbinghaus decay triggered: %d memories decayed", result.get("decayed", 0))
     except Exception as exc:
         logger.debug("  Ebbinghaus decay trigger failed: %s", exc)
 
@@ -221,6 +197,8 @@ def phase_inject(client: HeartbeatClient, ctx: CycleContext):
     # and boost stability (needed for myelin strengthening and stability check)
     _search_to_activate(client, ctx.project_a, "inversores Modbus monitorización")
     _search_to_activate(client, ctx.project_b, "mantenimiento predictivo Modbus")
+    # Bridged search to create cross-project access patterns for myelin
+    _search_to_activate(client, ctx.project_a, "mantenimiento predictivo inversores", scope="bridged")
 
     total = len(ctx.memory_ids)
     logger.info("Phase 1 complete: %d memories injected", total)
