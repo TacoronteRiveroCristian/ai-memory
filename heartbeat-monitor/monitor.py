@@ -113,8 +113,8 @@ def phase_inject(client: HeartbeatClient, ctx: CycleContext):
 
     try:
         client.bridge_projects(
-            project_a=ctx.project_a,
-            project_b=ctx.project_b,
+            project=ctx.project_a,
+            related_project=ctx.project_b,
             reason=BRIDGE_REASON,
         )
         logger.info("  Bridge created: %s <-> %s", ctx.project_a, ctx.project_b)
