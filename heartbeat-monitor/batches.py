@@ -35,6 +35,7 @@ class CycleContext:
     project_b: str = ""
     memory_ids: dict[str, str] = field(default_factory=dict)
     initial_snapshots: dict[str, dict[str, Any]] = field(default_factory=dict)
+    post_sleep_snapshots: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def set_projects(self, prefix: str) -> None:
         tag = uuid.uuid4().hex[:6]

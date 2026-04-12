@@ -142,13 +142,22 @@ def check_reinforcement_applied(client: HeartbeatClient, ctx: CycleContext) -> C
 
 
 def check_stability_increased(client: HeartbeatClient, ctx: CycleContext) -> CheckResult:
-    """Accessed memories should have higher stability than initial snapshot."""
+    """Accessed memories should have higher stability than initial snapshot.
+
+    Uses post_sleep_snapshots (taken after deep sleep but before clock advance)
+    when available, to avoid Ebbinghaus decay from test clock manipulation.
+    Falls back to live query otherwise.
+    """
     for key in ("cluster_0", "cluster_1", "cluster_2"):
         mid = ctx.memory_ids.get(key)
         if not mid or key not in ctx.initial_snapshots:
             continue
         initial = ctx.initial_snapshots[key]["stability_score"]
-        current = take_memory_snapshot(client, mid)["stability_score"]
+        # Prefer post-sleep snapshot (before clock advance decay)
+        if key in ctx.post_sleep_snapshots:
+            current = ctx.post_sleep_snapshots[key]["stability_score"]
+        else:
+            current = take_memory_snapshot(client, mid)["stability_score"]
         if current > initial:
             return CheckResult("stability_increased", True, f"{initial:.3f}->{current:.3f}")
 

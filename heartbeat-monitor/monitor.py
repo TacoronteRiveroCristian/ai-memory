@@ -102,6 +102,39 @@ def _search_to_activate(client: HeartbeatClient, project: str, query: str):
         logger.debug("  Search activation failed: %s", exc)
 
 
+def _trigger_ebbinghaus_decay(client: HeartbeatClient, ctx: CycleContext):
+    """Trigger Ebbinghaus decay via plasticity session (uses api-server's now_utc)."""
+    session_id = f"hb-decay-{uuid.uuid4().hex[:8]}"
+    try:
+        client.record_session(
+            project=ctx.project_a,
+            agent_id="heartbeat-decay",
+            session_id=session_id,
+            summary="Decay trigger",
+            goal="Trigger Ebbinghaus decay",
+            outcome="Completed",
+            changes=[],
+            decisions=[],
+            errors=[],
+            follow_ups=[],
+        )
+        client.apply_session_plasticity(
+            project=ctx.project_a,
+            agent_id="heartbeat-decay",
+            session_id=session_id,
+            summary="Decay trigger",
+            goal="Trigger Ebbinghaus decay",
+            outcome="Completed",
+            changes=[],
+            decisions=[],
+            errors=[],
+            follow_ups=[],
+        )
+        logger.info("  Ebbinghaus decay triggered via plasticity session")
+    except Exception as exc:
+        logger.debug("  Ebbinghaus decay trigger failed: %s", exc)
+
+
 def _is_test_mode(client: HeartbeatClient) -> bool:
     """Check if the API server is running in test mode."""
     try:
@@ -122,9 +155,6 @@ def phase_inject(client: HeartbeatClient, ctx: CycleContext):
     inject_batch(client, ctx, BATCH_1_CLUSTER, ctx.project_a, "cluster")
     time.sleep(1)
 
-    # Search cluster memories so they get last_accessed_at and stability boost
-    _search_to_activate(client, ctx.project_a, "inversores Modbus monitorización")
-
     logger.info("Batch 2: Contradiction")
     inject_batch(client, ctx, BATCH_2_CONTRADICTION, ctx.project_a, "contra")
     time.sleep(1)
@@ -141,9 +171,6 @@ def phase_inject(client: HeartbeatClient, ctx: CycleContext):
         logger.info("  Bridge created: %s <-> %s", ctx.project_a, ctx.project_b)
     except Exception as exc:
         logger.warning("  Bridge creation failed: %s", exc)
-
-    # Search cross-project memories so they get last_accessed_at (needed for myelin)
-    _search_to_activate(client, ctx.project_b, "mantenimiento predictivo Modbus")
 
     time.sleep(1)
 
@@ -181,12 +208,19 @@ def phase_inject(client: HeartbeatClient, ctx: CycleContext):
     logger.info("Batch 5: Cold memory (will not be accessed)")
     inject_batch(client, ctx, BATCH_5_COLD, ctx.project_a, "cold")
 
+    # Take initial snapshots BEFORE search activation
+    # (so stability_increased can detect the boost from search)
     logger.info("Taking initial snapshots...")
     for key, mid in ctx.memory_ids.items():
         try:
             ctx.initial_snapshots[key] = take_memory_snapshot(client, mid)
         except Exception:
             logger.debug("  Snapshot failed for %s", key)
+
+    # Search cluster and cross-project memories to set last_accessed_at
+    # and boost stability (needed for myelin strengthening and stability check)
+    _search_to_activate(client, ctx.project_a, "inversores Modbus monitorización")
+    _search_to_activate(client, ctx.project_b, "mantenimiento predictivo Modbus")
 
     total = len(ctx.memory_ids)
     logger.info("Phase 1 complete: %d memories injected", total)
@@ -289,17 +323,29 @@ def run_cycle(client: HeartbeatClient, previous_health: float) -> tuple[list[Che
         remaining -= wait
         touch_heartbeat()
 
-    # In test mode, advance the clock so Ebbinghaus decay and cold pruning work
+    phase_sleep(client, ctx)
+
+    # In test mode: take post-sleep snapshots (before clock advance) for stability check,
+    # then advance clock and trigger Ebbinghaus decay for cold memory check
     if test_mode:
+        # Snapshot after deep sleep but before decay — captures stability boost from search
+        logger.info("Taking post-sleep snapshots for stability comparison...")
+        for key in ("cluster_0", "cluster_1", "cluster_2"):
+            mid = ctx.memory_ids.get(key)
+            if mid:
+                try:
+                    ctx.post_sleep_snapshots[key] = take_memory_snapshot(client, mid)
+                except Exception:
+                    pass
+
         try:
             from datetime import datetime, timedelta, timezone
             future = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
             client.set_test_clock(future)
-            logger.info("Test clock advanced 30 days for deep sleep")
+            logger.info("Test clock advanced 30 days for Ebbinghaus decay")
+            _trigger_ebbinghaus_decay(client, ctx)
         except Exception as exc:
-            logger.warning("Failed to advance test clock: %s", exc)
-
-    phase_sleep(client, ctx)
+            logger.warning("Failed test clock advance/decay: %s", exc)
 
     logger.info("Waiting %ds before verification...", VERIFY_INTERVAL)
     remaining = VERIFY_INTERVAL
