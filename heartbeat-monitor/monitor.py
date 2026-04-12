@@ -93,6 +93,24 @@ def inject_batch(client: HeartbeatClient, ctx: CycleContext, batch, project: str
         logger.info("  Injected %s: %s", key, result["memory_id"][:8])
 
 
+def _search_to_activate(client: HeartbeatClient, project: str, query: str):
+    """Fire a search to set last_accessed_at and boost stability on matching memories."""
+    try:
+        client.structured_search(query=query, project=project, limit=5)
+        logger.info("  Search activation: '%s' in %s", query[:40], project)
+    except Exception as exc:
+        logger.debug("  Search activation failed: %s", exc)
+
+
+def _is_test_mode(client: HeartbeatClient) -> bool:
+    """Check if the API server is running in test mode."""
+    try:
+        health = client.get("/health")
+        return health.get("test_mode", False)
+    except Exception:
+        return False
+
+
 def phase_inject(client: HeartbeatClient, ctx: CycleContext):
     """Phase 1: Inject all trap batches."""
     logger.info("=== PHASE 1: INJECT (cycle %s) ===", ctx.cycle_id)
@@ -103,6 +121,9 @@ def phase_inject(client: HeartbeatClient, ctx: CycleContext):
     logger.info("Batch 1: Cluster base (%s)", ctx.project_a)
     inject_batch(client, ctx, BATCH_1_CLUSTER, ctx.project_a, "cluster")
     time.sleep(1)
+
+    # Search cluster memories so they get last_accessed_at and stability boost
+    _search_to_activate(client, ctx.project_a, "inversores Modbus monitorización")
 
     logger.info("Batch 2: Contradiction")
     inject_batch(client, ctx, BATCH_2_CONTRADICTION, ctx.project_a, "contra")
@@ -120,6 +141,9 @@ def phase_inject(client: HeartbeatClient, ctx: CycleContext):
         logger.info("  Bridge created: %s <-> %s", ctx.project_a, ctx.project_b)
     except Exception as exc:
         logger.warning("  Bridge creation failed: %s", exc)
+
+    # Search cross-project memories so they get last_accessed_at (needed for myelin)
+    _search_to_activate(client, ctx.project_b, "mantenimiento predictivo Modbus")
 
     time.sleep(1)
 
@@ -252,7 +276,8 @@ def phase_verify(client: HeartbeatClient, ctx: CycleContext, previous_health: fl
 def run_cycle(client: HeartbeatClient, previous_health: float) -> tuple[list[CheckResult], float]:
     """Execute one full heartbeat cycle: inject -> sleep -> verify."""
     ctx = CycleContext()
-    logger.info("Starting heartbeat cycle %s (mode=%s)", ctx.cycle_id, MODE)
+    test_mode = _is_test_mode(client)
+    logger.info("Starting heartbeat cycle %s (mode=%s, test_mode=%s)", ctx.cycle_id, MODE, test_mode)
 
     phase_inject(client, ctx)
 
@@ -263,6 +288,16 @@ def run_cycle(client: HeartbeatClient, previous_health: float) -> tuple[list[Che
         time.sleep(wait)
         remaining -= wait
         touch_heartbeat()
+
+    # In test mode, advance the clock so Ebbinghaus decay and cold pruning work
+    if test_mode:
+        try:
+            from datetime import datetime, timedelta, timezone
+            future = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+            client.set_test_clock(future)
+            logger.info("Test clock advanced 30 days for deep sleep")
+        except Exception as exc:
+            logger.warning("Failed to advance test clock: %s", exc)
 
     phase_sleep(client, ctx)
 
@@ -275,6 +310,14 @@ def run_cycle(client: HeartbeatClient, previous_health: float) -> tuple[list[Che
         touch_heartbeat()
 
     results = phase_verify(client, ctx, previous_health)
+
+    # Reset test clock after verification
+    if test_mode:
+        try:
+            client.set_test_clock(None)
+            logger.info("Test clock reset")
+        except Exception as exc:
+            logger.warning("Failed to reset test clock: %s", exc)
 
     try:
         current_health = client.brain_health().get("overall_health", 0.5)

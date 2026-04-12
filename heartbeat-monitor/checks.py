@@ -81,6 +81,7 @@ def check_contradiction_resolved(client: HeartbeatClient, ctx: CycleContext) -> 
     if not all(contra_ids):
         return CheckResult("contradiction_resolved", False, "Contradiction memories not injected")
 
+    # Check for resolution relations
     for mid in contra_ids:
         rels = client.relations(mid).get("relations", [])
         for rel in rels:
@@ -88,6 +89,21 @@ def check_contradiction_resolved(client: HeartbeatClient, ctx: CycleContext) -> 
                 return CheckResult("contradiction_resolved", True, f"resolution type={rel['relation_type']}")
             if rel.get("relation_type") == "contradicts":
                 return CheckResult("contradiction_resolved", True, "contradicts relation active (NREM processed)")
+
+    # Check for b_wins signature: mem_b stability much lower than mem_a
+    # (test mode heuristic resolves contradictions with b_wins)
+    try:
+        snap_a = take_memory_snapshot(client, contra_ids[0])
+        snap_b = take_memory_snapshot(client, contra_ids[1])
+        stab_a = snap_a["stability_score"]
+        stab_b = snap_b["stability_score"]
+        if stab_a > 0 and stab_b < stab_a * 0.5:
+            return CheckResult(
+                "contradiction_resolved", True,
+                f"b_wins detected: a={stab_a:.3f} b={stab_b:.3f}"
+            )
+    except Exception:
+        pass
 
     return CheckResult("contradiction_resolved", False, "No resolution evidence after NREM")
 
