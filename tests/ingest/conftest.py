@@ -8,6 +8,16 @@ myelination, etc.).
 import sys
 from pathlib import Path
 
+import pytest
+
 _API_SERVER = Path(__file__).resolve().parents[2] / "api-server"
 if str(_API_SERVER) not in sys.path:
     sys.path.insert(0, str(_API_SERVER))
+
+
+# Override the autouse fixture from the root conftest so that pure unit tests
+# in this directory do not require a running API server or MEMORY_API_KEY.
+@pytest.fixture(autouse=True)
+def require_test_mode():  # type: ignore[override]
+    """No-op override: ingest unit tests are fully offline."""
+    yield
