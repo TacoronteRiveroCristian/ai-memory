@@ -5,6 +5,19 @@ from ingest_models import (
     ClassifiedAction,
     parse_classifier_response,
 )
+from classifier import get_classifier
+
+
+def test_fake_classifier_used_when_provider_is_fake(monkeypatch):
+    monkeypatch.setenv("CLASSIFIER_PROVIDER", "fake")
+    clf = get_classifier()
+    result = clf.classify({
+        "user_message": "there is a bug in the login flow",
+        "assistant_message": "fixed it by validating the token",
+        "tool_calls": [{"name": "Edit", "summary": "auth.py"}],
+    })
+    assert len(result.actions) >= 1
+    assert result.actions[0].type == "store_error"
 
 
 def test_turn_payload_accepts_minimal_valid():
