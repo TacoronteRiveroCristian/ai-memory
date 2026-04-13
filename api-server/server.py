@@ -3835,7 +3835,9 @@ async def store_decision(
     - `tags` y `agent_id` mejoran trazabilidad y recuperación posterior.
 
     Devuelve:
-    - `OK ...` si la decisión quedó registrada.
+    - `OK decision='...' project=... memory_id=...` si la decisión quedó registrada.
+      El `memory_id` corresponde a la memoria semántica derivada, para que el agente
+      pueda enlazarla inmediatamente con `link_memories` sin tener que buscarla.
     - `ERROR ...` si falló la persistencia o la memoria derivada.
     """
     try:
@@ -3858,7 +3860,7 @@ async def store_decision(
                 agent_id,
                 tags_list,
             )
-        await store_memory(
+        memory_result = await store_memory(
             content=f"DECISION: {title}\n{decision}\nRationale: {rationale}",
             project=project,
             memory_type="decision",
@@ -3867,7 +3869,9 @@ async def store_decision(
             agent_id=agent_id,
             skip_similar=True,
         )
-        return f"OK decision='{title}' project={project}"
+        memory_id_match = re.search(r"memory_id=([0-9a-f-]{36})", memory_result or "")
+        memory_id_suffix = f" memory_id={memory_id_match.group(1)}" if memory_id_match else ""
+        return f"OK decision='{title}' project={project}{memory_id_suffix}"
     except Exception as exc:
         logger.exception("store_decision fallo")
         return f"ERROR {exc}"
@@ -4065,12 +4069,38 @@ async def delete_memory(memory_id: str) -> str:
     - Úsala con cuidado: es una operación destructiva.
 
     Devuelve:
-    - `OK ...` si la memoria fue eliminada.
+    - `OK deleted=<id> relations=<n>` si la memoria fue eliminada del índice
+      vectorial y de la base relacional (memory_log + memory_relations).
     - `ERROR ...` si la operación falla.
     """
     try:
+        relations_removed = 0
+        log_removed = 0
+        if pg_pool:
+            async with pg_pool.acquire() as conn:
+                async with conn.transaction():
+                    relations_removed = await conn.fetchval(
+                        """
+                        WITH deleted AS (
+                            DELETE FROM memory_relations
+                            WHERE source_memory_id = $1 OR target_memory_id = $1
+                            RETURNING 1
+                        )
+                        SELECT COUNT(*) FROM deleted
+                        """,
+                        memory_id,
+                    ) or 0
+                    log_removed = await conn.fetchval(
+                        """
+                        WITH deleted AS (
+                            DELETE FROM memory_log WHERE id = $1 RETURNING 1
+                        )
+                        SELECT COUNT(*) FROM deleted
+                        """,
+                        memory_id,
+                    ) or 0
         await qdrant.delete(collection_name=COLLECTION_NAME, points_selector=[memory_id])
-        return f"OK deleted={memory_id}"
+        return f"OK deleted={memory_id} log_removed={log_removed} relations_removed={relations_removed}"
     except Exception as exc:
         logger.exception("delete_memory fallo")
         return f"ERROR {exc}"

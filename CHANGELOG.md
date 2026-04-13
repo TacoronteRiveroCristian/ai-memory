@@ -1,5 +1,33 @@
 # Changelog
 
+## 2026-04-12
+
+### Added
+- **Heartbeat monitor service** (`heartbeat-monitor/`) — living proof system that injects synthetic "trap" memories, triggers biological processes (decay, activation, consolidation), and verifies end-to-end that the brain is actually functioning. New Docker Compose service + Makefile targets. Includes 8 verification checks, all now passing in test mode. Backed by new tables `heartbeat_cycles` and `manual_deep_sleep_runs`, new API endpoints for deep-sleep trigger and heartbeat status, and worker support for manual deep sleep triggers. Design spec + 11-task implementation plan under `docs/`.
+- **Deep sleep NREM/REM phases** (`reflection-worker/worker.py`) — deep sleep is no longer a flat consolidation pass; it now runs a NREM phase (slow-wave consolidation, myelin strengthening) followed by a REM phase (associative replay, weak-link pruning) with adaptive decay. New columns `nrem_stats` and `rem_stats` in `sleep_cycles` for per-phase telemetry.
+- **Adaptive myelination** (`api-server/myelination.py`) — adaptive myelin functions and co-activation strengthening: frequently co-activated memories strengthen their shared paths over time, mirroring activity-dependent myelination.
+- **Proactive save protocol** — the MCP server now exposes a `serverInstructions` block and resource that tells connected agents to save memories proactively on defined triggers (decisions, errors, patterns, architecture). Documented in `docs/MCP_TOOLS.md`. Paired with proactive contradiction detection in `sensory-cortex/compute_contradiction_score` and integrated into automatic relation inference.
+- **Novelty-based merge at ingestion** — near-identical memories are now merged at store time instead of creating duplicates, controlled by a novelty threshold. Part of "Phase 1 brain quick wins" alongside uncertainty-aware confidence scoring, keyphrase SDR pre-filter, and lateral inhibition in spreading activation.
+- **Project deletion flow** — new `DELETE /api/projects/{name}` endpoint, MCP `delete_project` tool, Brain UI trash icon + confirmation modal + bulk delete. FK on `memory_log.project_id` is `SET NULL` (not `CASCADE`), so the endpoint explicitly deletes `memory_log` rows before the project row and wraps everything in a single Postgres transaction.
+- **Brain UI "Living Brain" evolution** — biological brain visualization with radial layout and health dashboard, new Guide tab (design spec → implementation → CSS module), multi-keyword chip filter, center-view button, stable node selection, smooth transitions and accurate relation click handling.
+- **Critical reviewer plugin** — Claude Code plugin scaffold (`SKILL.md`, hooks, settings) for adversarial review of proposals before implementation.
+- **MCP effectiveness measurement** + token benchmark suite for cost analysis of MCP tool usage.
+
+### Fixed
+- **`store_decision` now exposes `memory_id` of the derived semantic memory** (`api-server/server.py:3816`). Previously returned only `OK decision='...' project=...`, discarding the `store_memory` result. This forced callers to fall back to SQL or similarity search to find the derived memory, and in practice left orphan decision nodes in the Living Brain graph. Return shape is now `OK decision='...' project=... memory_id=<uuid>`, letting agents immediately call `link_memories` with the real id.
+- **`delete_memory` is now transactional and consistent across Qdrant + Postgres** (`api-server/server.py:4060`). Before this fix the tool only deleted the Qdrant point and returned a misleading `OK deleted=<id>`, leaving the `memory_log` row and all `memory_relations` pointing at a ghost memory — the vector disappeared from semantic search but the node remained visible in the UI graph. `delete_memory` now wraps `memory_relations` + `memory_log` deletions in a single Postgres transaction before touching Qdrant, and returns `log_removed=<n>` / `relations_removed=<n>` counters so callers can confirm the cleanup.
+- **Heartbeat test-mode flow** — restructured so all 8 verification checks pass deterministically under `AI_MEMORY_TEST_MODE=true`, including fixing `bridge_projects` field names.
+- **Code review follow-ups** across proactive protocol, runtime biology, and deep sleep evolution branches.
+- **Test suite stabilization** — project-filtered facets in demo test (avoids `LIMIT 100` cap), `overall_health` vs `status` assertion in brain health test, tag format + contradiction score parsing, flaky assertions in novelty/subgraph/delete tests.
+- **Docker build context** for heartbeat service corrected to its own directory.
+
+### Changed
+- **Activation consolidation from Redis → Postgres** (`api-server/server.py`) — activation scores accumulated in Redis are now periodically consolidated back to `memory_log`, so plasticity state survives Redis restarts.
+- **Partial index on suspected contradictions** — new partial index speeds up contradiction-queue scans.
+
+### Notes
+- The `store_decision` / `delete_memory` fixes were discovered while populating the memory graph for the `claude-skills` project analysis: a decision node ended up orphaned because the derived `memory_id` was not returned, and then `delete_memory` failed to clean up the row on the first cleanup attempt. Both bugs are registered as `error`-type memories in the `ai-memory` project for future reference.
+
 ## 2026-03-30
 
 ### Added
