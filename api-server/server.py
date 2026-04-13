@@ -4633,6 +4633,10 @@ async def app_lifespan(_: FastAPI):
 app.router.lifespan_context = app_lifespan
 app.mount("/mcp", mcp_app)
 
+# --- Passive turn ingestion ---
+from ingest import init_ingest_routes as _init_ingest_routes  # noqa: E402
+_init_ingest_routes(app)
+
 
 if __name__ == "__main__":
     uvicorn.run("server:app", host="0.0.0.0", port=8050, log_level="info", workers=1)
