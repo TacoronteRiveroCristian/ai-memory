@@ -8,6 +8,9 @@ BASE_URL="${AI_MEMORY_BASE_URL:-http://127.0.0.1:8050}"
 TEST_NOW="${AI_MEMORY_TEST_NOW_OVERRIDE:-2030-01-01T00:00:00+00:00}"
 KEEP_STACK_UP="${KEEP_STACK_UP:-false}"
 BRAIN_EVAL_ARGS="${BRAIN_EVAL_ARGS:-}"
+# Proyectos "reales" que NO deben borrarse por el cleanup post-suite.
+# Override con PROTECTED_PROJECTS="a,b,c".
+PROTECTED_PROJECTS="${PROTECTED_PROJECTS:-claude-skills,ai-memory}"
 
 cd "$PROJECT_DIR"
 
@@ -87,6 +90,30 @@ python3 -m pytest -q
 echo
 echo "==> Ejecutando benchmark determinista"
 python3 scripts/eval_brain.py --mode deterministic $BRAIN_EVAL_ARGS
+
+echo
+echo "==> Limpiando proyectos de test (conserva: $PROTECTED_PROJECTS)"
+PROTECTED_REGEX="^($(echo "$PROTECTED_PROJECTS" | sed 's/,/|/g'))$"
+API_KEY_HEADER="X-API-Key: ${MEMORY_API_KEY:-}"
+PROJECT_LIST="$(
+    docker compose exec -T postgres \
+        psql -U "${POSTGRES_USER:-memoryuser}" -d "${POSTGRES_DB:-memorydb}" \
+        -tAc "SELECT name FROM projects" 2>/dev/null || true
+)"
+deleted=0
+while IFS= read -r name; do
+    [[ -z "$name" ]] && continue
+    if [[ "$name" =~ $PROTECTED_REGEX ]]; then
+        continue
+    fi
+    code="$(curl -s -o /dev/null -w '%{http_code}' \
+        -X DELETE -H "$API_KEY_HEADER" \
+        "$BASE_URL/api/projects/$name" || true)"
+    if [[ "$code" == "200" ]]; then
+        deleted=$((deleted + 1))
+    fi
+done <<<"$PROJECT_LIST"
+echo "Proyectos de test borrados: $deleted"
 
 echo
 echo "Suite determinista completada correctamente."
