@@ -6,7 +6,7 @@ import logging
 import os
 from typing import Any, Protocol
 
-from ingest_models import ClassifierResult, parse_classifier_response
+from ingest_models import ClassifiedAction, ClassifierResult, parse_classifier_response
 
 logger = logging.getLogger(__name__)
 
@@ -83,14 +83,42 @@ class OpenAICompatClassifier:
             raise ValueError("classifier returned non-JSON") from e
 
 
+class _InlineFakeClassifier:
+    """Deterministic classifier used in test mode and inside the container."""
+
+    def classify(self, turn):
+        user = (turn.get("user_message") or "").lower()
+        assistant = (turn.get("assistant_message") or "").lower()
+        actions = []
+        if "bug" in user or "error" in user:
+            actions.append(ClassifiedAction(
+                type="store_error",
+                title="Fake detected bug",
+                content=f"User reported a bug and assistant responded: {assistant[:200] or 'n/a'}",
+                tags="fake/error",
+                importance=0.85,
+            ))
+        if "decision" in user or "decisión" in user or "decide" in assistant:
+            actions.append(ClassifiedAction(
+                type="store_decision",
+                title="Fake decision captured",
+                content=f"A decision was taken in this turn: {assistant[:200] or 'n/a'}",
+                tags="fake/decision",
+                importance=0.9,
+            ))
+        if "pattern" in assistant or "insight" in assistant:
+            actions.append(ClassifiedAction(
+                type="store_observation",
+                title="Fake observation",
+                content=f"Observation from assistant reply: {assistant[:200]}",
+                tags="fake/observation",
+                importance=0.7,
+            ))
+        return ClassifierResult(actions=actions)
+
+
 def get_classifier() -> ClassifierProtocol:
     provider = os.getenv("CLASSIFIER_PROVIDER", "openai-compat").lower()
     if provider == "fake":
-        import sys
-        from pathlib import Path
-        fakes_dir = Path(__file__).resolve().parents[1] / "tests" / "fakes"
-        if str(fakes_dir) not in sys.path:
-            sys.path.insert(0, str(fakes_dir))
-        from fake_classifier import FakeClassifier  # type: ignore
-        return FakeClassifier()
+        return _InlineFakeClassifier()
     return OpenAICompatClassifier()
