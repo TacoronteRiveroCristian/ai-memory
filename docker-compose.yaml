@@ -225,7 +225,7 @@ services:
     build:
       context: ./brain-ui
       args:
-        VITE_API_URL: http://localhost:8050
+        VITE_API_URL: ${VITE_API_URL:-http://localhost:8050}
         VITE_API_KEY: ${MEMORY_API_KEY}
     container_name: ai-memory-brain-ui
     restart: unless-stopped

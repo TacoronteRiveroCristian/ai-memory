@@ -19,3 +19,4 @@ brain-ui/node_modules/
 brain-ui/dist/
 .superpowers/
 .playwright-mcp
+.mcp.json
