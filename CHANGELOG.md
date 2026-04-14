@@ -1,5 +1,25 @@
 # Changelog
 
+## 2026-04-14
+
+### Added
+- **Persistent ingest observability** (`api-server/ingest_persistence.py`) — the passive-ingest pipeline now persists every turn outcome to Postgres instead of only tracking in-memory counters that were lost on restart. Two new idempotent tables created via `run_schema_migrations`:
+  - `ingest_daily_stats(day, project, turns, filtered, filtered_by_reason JSONB, classified, stored, deduped, errors, links, classifier_ms_total, classifier_ms_count, last_turn_at)` — one row per (day, project), upserted incrementally with filter-reason histograms.
+  - `classifier_audit(id, ts, project, session_id, turn_id, turn_hash, user_len, assistant_len, tools_count, outcome, filter_reason, action_types, classifier_ms, error_detail)` — one row per classified turn, toggleable via `INGEST_AUDIT_ENABLED` (default `true`). Finally answers "what did the classifier reject, and why?".
+- **`GET /ingest/stats` global view** — called without a `project` query param, returns a 7-day rollup across all projects with per-project breakdown + grand totals + filter-reason histogram + `last_turn_at`. The existing `?project=X` call remains backward compatible (in-memory counters, same shape).
+- **`GET /ingest/audit`** — new endpoint that streams the most recent classifier decisions for manual inspection. Supports `project`, `outcome` (one of `filtered`, `accepted_empty`, `accepted_actions`, `error`) and `limit` filters. This is the primary tool for calibrating the pre-filter and classifier thresholds.
+- **`INGEST_AUDIT_ENABLED` env var** — controls whether per-turn audit rows are persisted. Defaults to `true`; set to `false` in high-volume production if the audit trail grows too fast.
+- **`tests/ingest/test_persistence_unit.py`** — 11 pure-Python unit tests covering turn hashing, audit-flag behavior, `TurnEvent` state transitions, and no-op safety when `pg_pool` is `None`.
+- **`tests/ingest/test_observability_endpoints.py`** — 5 integration tests validating the global rollup, filter-reason tracking, audit trail, outcome filtering, and backward-compatible project view.
+
+### Changed
+- **`api-server/ingest.py`** — `ingest_turn` now builds a `TurnEvent` at the top and persists it exactly once before returning, on every branch (project_disabled, rate_limited, pre-filter rejected, classifier error, classifier success). In-memory `_stats` dict is preserved untouched for backward compatibility and fast reads.
+- **`api-server/Dockerfile`** — added `COPY ingest_persistence.py` so the new module ships in the container image.
+
+### Notes
+- This is Fase A of a larger observability + reliability plan. Pending fases tracked in `docs/PENDING_WEEK_REVIEW.md` for review one week after deployment, once real audit data has accumulated. Specifically: classifier retries + dead-letter queue (B), unified `/ops` endpoint (C), semantic dedupe via Qdrant (D), and a real non-deterministic E2E test running on cron (E).
+- The reasoning for prioritizing observability before any of these: you cannot calibrate retries, dedupe thresholds, or E2E expectations without first knowing what the classifier is actually doing. One week of real audit trail will inform every downstream decision.
+
 ## 2026-04-12
 
 ### Added

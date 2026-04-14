@@ -17,6 +17,7 @@ COPY sensory_cortex.py .
 COPY myelination.py .
 COPY brain_health.py .
 COPY ingest.py .
+COPY ingest_persistence.py .
 COPY ingest_models.py .
 COPY ingest_sanitize.py .
 COPY ingest_filter.py .

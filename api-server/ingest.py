@@ -19,6 +19,13 @@ from ingest_models import (
     IngestResponse,
     TurnPayload,
 )
+from ingest_persistence import (
+    TurnEvent,
+    compute_turn_hash,
+    fetch_audit,
+    fetch_global_stats,
+    persist_turn_event,
+)
 from ingest_rate_limit import RateLimiter
 from ingest_sanitize import sanitize_turn
 
@@ -172,9 +179,24 @@ async def _execute_action(
         return ActionOutcome(type=action.type, error=str(e))
 
 
+def _build_event(payload: TurnPayload) -> TurnEvent:
+    return TurnEvent(
+        project=payload.project,
+        session_id=payload.session_id or "",
+        turn_id=payload.turn_id or "",
+        user_len=len(payload.user_message or ""),
+        assistant_len=len(payload.assistant_message or ""),
+        tools_count=len(payload.tool_calls or []),
+        turn_hash=compute_turn_hash(payload.user_message or "", payload.assistant_message or ""),
+    )
+
+
 def init_ingest_routes(app) -> None:
     # Lazy import of the server module to avoid circular-import at module load.
     import server  # api-server/server.py
+
+    async def _persist(event: TurnEvent) -> None:
+        await persist_turn_event(getattr(server, "pg_pool", None), event)
 
     @app.post("/ingest_turn", response_model=IngestResponse)
     async def ingest_turn(request: Request) -> IngestResponse:
@@ -195,9 +217,12 @@ def init_ingest_routes(app) -> None:
             raise HTTPException(status_code=422, detail=str(e))
 
         _stats[payload.project]["turns"] += 1
+        event = _build_event(payload)
 
         if _project_disabled(payload.project):
             _stats[payload.project]["filtered"] += 1
+            event.mark_filtered("project_disabled")
+            await _persist(event)
             return IngestResponse(
                 status="ok",
                 filtered=True,
@@ -207,6 +232,8 @@ def init_ingest_routes(app) -> None:
 
         if not _rate_limiter.allow(payload.session_id):
             _stats[payload.project]["filtered"] += 1
+            event.mark_filtered("rate_limited")
+            await _persist(event)
             return IngestResponse(
                 status="ok",
                 filtered=True,
@@ -218,6 +245,8 @@ def init_ingest_routes(app) -> None:
         ok, reason = should_classify(sanitized)
         if not ok:
             _stats[payload.project]["filtered"] += 1
+            event.mark_filtered(reason)
+            await _persist(event)
             return IngestResponse(
                 status="ok",
                 filtered=True,
@@ -232,6 +261,8 @@ def init_ingest_routes(app) -> None:
         except Exception as e:
             logger.exception("classifier failed")
             _stats[payload.project]["errors"] += 1
+            event.mark_error(str(e)[:500])
+            await _persist(event)
             return IngestResponse(
                 status="error",
                 stage="classifier",
@@ -242,6 +273,7 @@ def init_ingest_routes(app) -> None:
         _stats[payload.project]["classifier_ms_total"] += clf_ms
         _stats[payload.project]["classifier_ms_count"] += 1
         _stats[payload.project]["classified"] += 1
+        event.mark_classified(clf_ms, [a.type for a in result.actions])
 
         recent = await _fetch_recent_memories(
             payload.project, lookback_limit(), getattr(server, "pg_pool", None)
@@ -251,6 +283,7 @@ def init_ingest_routes(app) -> None:
             fp = action_fingerprint({"title": action.title, "content": action.content})
             if any(action_fingerprint(m) == fp for m in recent):
                 _stats[payload.project]["deduped"] += 1
+                event.deduped += 1
                 outcomes.append(
                     ActionOutcome(type=action.type, skipped=True, skip_reason="duplicate")
                 )
@@ -268,8 +301,11 @@ def init_ingest_routes(app) -> None:
             if outcome.memory_id and not outcome.error:
                 _stats[payload.project]["stored"] += 1
                 _stats[payload.project]["links"] += outcome.links_created
+                event.stored += 1
+                event.links += outcome.links_created
             elif outcome.error:
                 _stats[payload.project]["errors"] += 1
+                event.errors += 1
             outcomes.append(outcome)
 
         stored = sum(1 for o in outcomes if o.memory_id and not o.error)
@@ -278,6 +314,7 @@ def init_ingest_routes(app) -> None:
             "ingest_turn project=%s turn=%s classifier_ms=%d emitted=%d stored=%d deduped=%d",
             payload.project, payload.turn_id, clf_ms, len(result.actions), stored, dedup_count,
         )
+        await _persist(event)
         return IngestResponse(
             status="ok",
             filtered=False,
@@ -287,20 +324,50 @@ def init_ingest_routes(app) -> None:
         )
 
     @app.get("/ingest/stats")
-    async def ingest_stats(project: str) -> dict[str, Any]:
-        s = _stats.get(project, {})
-        if not s:
-            return {"project": project, "turns_ingested": 0}
-        count = s["classifier_ms_count"]
-        avg = (s["classifier_ms_total"] // count) if count else 0
-        return {
-            "project": project,
-            "turns_ingested": s["turns"],
-            "filtered": s["filtered"],
-            "classified": s["classified"],
-            "actions_stored": s["stored"],
-            "deduped": s["deduped"],
-            "avg_classifier_ms": avg,
-            "errors": s["errors"],
-            "links_created": s["links"],
-        }
+    async def ingest_stats(project: str | None = None, days: int = 7) -> dict[str, Any]:
+        """Ingest observability.
+
+        - `project=X` → backward-compatible project view from in-memory counters.
+        - (no project) → global rollup from `ingest_daily_stats` over the last
+          `days` days: per-project breakdown + totals + filter reasons.
+        """
+        if project:
+            s = _stats.get(project, {})
+            if not s:
+                return {"project": project, "turns_ingested": 0}
+            count = s["classifier_ms_count"]
+            avg = (s["classifier_ms_total"] // count) if count else 0
+            return {
+                "project": project,
+                "turns_ingested": s["turns"],
+                "filtered": s["filtered"],
+                "classified": s["classified"],
+                "actions_stored": s["stored"],
+                "deduped": s["deduped"],
+                "avg_classifier_ms": avg,
+                "errors": s["errors"],
+                "links_created": s["links"],
+            }
+        pg_pool = getattr(server, "pg_pool", None)
+        return await fetch_global_stats(pg_pool, days=max(1, min(days, 90)))
+
+    @app.get("/ingest/audit")
+    async def ingest_audit(
+        project: str | None = None,
+        outcome: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """Return the most recent classifier decisions for manual inspection.
+
+        Filter by `project` and/or `outcome` (one of: filtered, accepted_empty,
+        accepted_actions, error). This is the answer to "what is the classifier
+        rejecting, and why?".
+        """
+        pg_pool = getattr(server, "pg_pool", None)
+        rows = await fetch_audit(
+            pg_pool,
+            project=project,
+            outcome=outcome,
+            limit=max(1, min(limit, 500)),
+        )
+        return {"count": len(rows), "rows": rows}

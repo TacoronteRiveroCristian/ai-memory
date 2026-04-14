@@ -859,6 +859,47 @@ async def run_schema_migrations():
         CREATE TRIGGER update_project_bridges_updated_at BEFORE UPDATE ON project_bridges
             FOR EACH ROW EXECUTE FUNCTION update_updated_at()
         """,
+        # Ingest observability — persistent stats + classifier audit trail
+        """
+        CREATE TABLE IF NOT EXISTS ingest_daily_stats (
+            day DATE NOT NULL,
+            project TEXT NOT NULL,
+            turns INT NOT NULL DEFAULT 0,
+            filtered INT NOT NULL DEFAULT 0,
+            filtered_by_reason JSONB NOT NULL DEFAULT '{}'::jsonb,
+            classified INT NOT NULL DEFAULT 0,
+            stored INT NOT NULL DEFAULT 0,
+            deduped INT NOT NULL DEFAULT 0,
+            errors INT NOT NULL DEFAULT 0,
+            links INT NOT NULL DEFAULT 0,
+            classifier_ms_total BIGINT NOT NULL DEFAULT 0,
+            classifier_ms_count INT NOT NULL DEFAULT 0,
+            last_turn_at TIMESTAMPTZ,
+            PRIMARY KEY (day, project)
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_ingest_daily_stats_project_day ON ingest_daily_stats(project, day DESC)",
+        """
+        CREATE TABLE IF NOT EXISTS classifier_audit (
+            id BIGSERIAL PRIMARY KEY,
+            ts TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            project TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            turn_id TEXT NOT NULL,
+            turn_hash TEXT NOT NULL,
+            user_len INT NOT NULL,
+            assistant_len INT NOT NULL,
+            tools_count INT NOT NULL,
+            outcome TEXT NOT NULL,
+            filter_reason TEXT,
+            action_types TEXT[] NOT NULL DEFAULT '{}',
+            classifier_ms INT,
+            error_detail TEXT
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_classifier_audit_project_ts ON classifier_audit(project, ts DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_classifier_audit_outcome_ts ON classifier_audit(outcome, ts DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_classifier_audit_ts ON classifier_audit(ts DESC)",
     ]
     async with pg_pool.acquire() as conn:
         async with conn.transaction():
