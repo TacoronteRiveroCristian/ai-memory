@@ -66,8 +66,8 @@ async def _fetch_recent_memories(project: str, limit: int, pg_pool) -> list[dict
         async with pg_pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT m.id::text AS id, COALESCE(m.content, '') AS content
-                FROM memories m
+                SELECT m.id::text AS id, COALESCE(m.summary, '') AS content
+                FROM memory_log m
                 JOIN projects p ON m.project_id = p.id
                 WHERE p.name = $1
                 ORDER BY m.created_at DESC
