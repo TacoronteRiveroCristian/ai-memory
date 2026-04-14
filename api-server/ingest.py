@@ -25,6 +25,22 @@ from ingest_sanitize import sanitize_turn
 logger = logging.getLogger(__name__)
 
 _MEMORY_ID_RE = re.compile(r"memory_id=([0-9a-f-]{36})")
+_STORED_PREFIXES = ("KNOWN ERROR: ", "DECISION: ")
+_STORED_SEPARATORS = ("\nSOLUTION: ", "\nRationale: ")
+
+
+def _canonicalize_stored(summary: str) -> dict[str, str]:
+    """Reverse the format applied by store_error/store_decision so the
+    fingerprint of a freshly-stored memory matches the originating action."""
+    text = summary or ""
+    for prefix in _STORED_PREFIXES:
+        if text.startswith(prefix):
+            text = text[len(prefix):]
+            break
+    for sep in _STORED_SEPARATORS:
+        text = text.replace(sep, "\n")
+    title, _, rest = text.partition("\n")
+    return {"title": title.strip(), "content": rest.strip()}
 _rate_limiter = RateLimiter()
 
 _stats: dict[str, dict[str, int]] = defaultdict(lambda: {
@@ -76,10 +92,7 @@ async def _fetch_recent_memories(project: str, limit: int, pg_pool) -> list[dict
                 project,
                 limit,
             )
-            return [
-                {"title": r["content"][:80], "content": r["content"]}
-                for r in rows
-            ]
+            return [_canonicalize_stored(r["content"]) for r in rows]
     except Exception as e:
         logger.warning("recent-memories fetch failed: %s", e)
         return []
