@@ -3927,7 +3927,7 @@ async def store_error(
                 solution,
                 tags_list,
             )
-        await store_memory(
+        memory_result = await store_memory(
             content=f"KNOWN ERROR: {error_description}\nSOLUTION: {solution}",
             project=project,
             memory_type="error",
@@ -3936,7 +3936,9 @@ async def store_error(
             agent_id="error-recorder",
             skip_similar=True,
         )
-        return f"OK error_signature='{signature}' project={project}"
+        memory_id_match = re.search(r"memory_id=([0-9a-f-]{36})", memory_result or "")
+        memory_id_suffix = f" memory_id={memory_id_match.group(1)}" if memory_id_match else ""
+        return f"OK error_signature='{signature}' project={project}{memory_id_suffix}"
     except Exception as exc:
         logger.exception("store_error fallo")
         return f"ERROR {exc}"
@@ -4632,6 +4634,10 @@ async def app_lifespan(_: FastAPI):
 
 app.router.lifespan_context = app_lifespan
 app.mount("/mcp", mcp_app)
+
+# --- Passive turn ingestion ---
+from ingest import init_ingest_routes as _init_ingest_routes  # noqa: E402
+_init_ingest_routes(app)
 
 
 if __name__ == "__main__":

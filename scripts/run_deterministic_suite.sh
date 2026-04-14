@@ -24,6 +24,9 @@ set +a
 export AI_MEMORY_TEST_MODE=true
 export AI_MEMORY_TEST_NOW="$TEST_NOW"
 export AI_MEMORY_BASE_URL="$BASE_URL"
+export CLASSIFIER_PROVIDER="${CLASSIFIER_PROVIDER:-fake}"
+export INGEST_DISABLED_PROJECTS="${INGEST_DISABLED_PROJECTS:-ingest-disabled-test}"
+export INGEST_ENABLED="${INGEST_ENABLED:-true}"
 
 dump_logs() {
   echo

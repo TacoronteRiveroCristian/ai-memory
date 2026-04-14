@@ -16,6 +16,14 @@ COPY server.py .
 COPY sensory_cortex.py .
 COPY myelination.py .
 COPY brain_health.py .
+COPY ingest.py .
+COPY ingest_models.py .
+COPY ingest_sanitize.py .
+COPY ingest_filter.py .
+COPY ingest_dedupe.py .
+COPY ingest_rate_limit.py .
+COPY classifier.py .
+COPY auto_linker.py .
 
 EXPOSE 8050
 
