@@ -85,3 +85,26 @@ def test_list_contradictions_surfaces_suspected_pair(brain_client, unique_projec
 def test_list_contradictions_unknown_project_is_empty(brain_client):
     payload = brain_client.list_contradictions(project="does-not-exist-zzz")
     assert payload["contradictions"] == []
+
+
+def test_brain_activity_shape(brain_client):
+    payload = brain_client.brain_activity(hours=24)
+    assert payload["window_hours"] == 24
+    assert set(["reflection_runs", "contradictions_new", "contradictions_resolved", "stats"]).issubset(payload)
+    stats = payload["stats"]
+    for key in ("runs", "promotions", "new_contradictions", "resolved_contradictions"):
+        assert key in stats
+        assert isinstance(stats[key], int)
+
+
+def test_brain_activity_hours_clamped(brain_client):
+    payload = brain_client.brain_activity(hours=9999)
+    assert payload["window_hours"] == 168
+
+
+def test_brain_activity_unknown_project_is_empty(brain_client):
+    payload = brain_client.brain_activity(hours=24, project="does-not-exist-zzz")
+    assert payload["reflection_runs"] == []
+    assert payload["contradictions_new"] == []
+    assert payload["contradictions_resolved"] == []
+    assert payload["stats"]["runs"] == 0

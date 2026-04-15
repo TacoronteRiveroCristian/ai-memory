@@ -3363,6 +3363,160 @@ async def list_contradictions_payload(
     }
 
 
+async def get_brain_activity_payload(
+    hours: int = 24,
+    project: Optional[str] = None,
+) -> dict[str, Any]:
+    """One-shot view of brain activity over the last N hours.
+
+    Composes reflection_runs (started within window), their promotions, and
+    contradictions created/resolved within the window. `hours` is capped to [1, 168].
+    """
+    hours = max(1, min(int(hours), 168))
+    if not pg_pool:
+        return {
+            "window_hours": hours,
+            "project": project,
+            "reflection_runs": [],
+            "contradictions_new": [],
+            "contradictions_resolved": [],
+            "stats": {"runs": 0, "promotions": 0, "new_contradictions": 0, "resolved_contradictions": 0},
+        }
+
+    cutoff_sql = f"NOW() - INTERVAL '{hours} hours'"
+
+    async with pg_pool.acquire() as conn:
+        project_id = await _resolve_project_id(conn, project)
+        if project and project_id is None:
+            return {
+                "window_hours": hours,
+                "project": project,
+                "reflection_runs": [],
+                "contradictions_new": [],
+                "contradictions_resolved": [],
+                "stats": {"runs": 0, "promotions": 0, "new_contradictions": 0, "resolved_contradictions": 0},
+            }
+
+        if project_id is None:
+            run_rows = await conn.fetch(
+                f"""
+                SELECT id, mode, status, model, input_count, promoted_count,
+                       error, started_at, finished_at
+                FROM reflection_runs
+                WHERE started_at >= {cutoff_sql}
+                ORDER BY started_at DESC
+                """
+            )
+        else:
+            run_rows = await conn.fetch(
+                f"""
+                SELECT DISTINCT r.id, r.mode, r.status, r.model, r.input_count,
+                       r.promoted_count, r.error, r.started_at, r.finished_at
+                FROM reflection_runs r
+                JOIN reflection_promotions p ON p.run_id = r.id
+                WHERE r.started_at >= {cutoff_sql} AND p.project_id = $1
+                ORDER BY r.started_at DESC
+                """,
+                project_id,
+            )
+
+        runs = [serialize_row(r) for r in run_rows]
+        promotion_total = 0
+        if runs:
+            run_ids = [uuid.UUID(r["id"]) for r in runs]
+            promo_query = """
+                SELECT rp.run_id, rp.item_type, rp.item_hash, rp.target_ref,
+                       rp.created_at, p.name AS project
+                FROM reflection_promotions rp
+                LEFT JOIN projects p ON p.id = rp.project_id
+                WHERE rp.run_id = ANY($1::uuid[])
+            """
+            params: list[Any] = [run_ids]
+            if project_id is not None:
+                promo_query += " AND rp.project_id = $2"
+                params.append(project_id)
+            promo_query += " ORDER BY rp.created_at ASC"
+            promo_rows = await conn.fetch(promo_query, *params)
+            by_run: dict[str, list[dict[str, Any]]] = {r["id"]: [] for r in runs}
+            for row in promo_rows:
+                serialized = serialize_row(row) or {}
+                run_key = serialized.pop("run_id", None)
+                if run_key in by_run:
+                    by_run[run_key].append(serialized)
+                    promotion_total += 1
+            for run in runs:
+                run["promotions"] = by_run.get(run["id"], [])
+
+        contra_new_query = f"""
+            SELECT cq.id, cq.memory_a_id, cq.memory_b_id, cq.resolution_status,
+                   cq.condition_text, cq.created_at,
+                   ma.summary AS memory_a_summary, pa.name AS memory_a_project,
+                   mb.summary AS memory_b_summary, pb.name AS memory_b_project
+            FROM contradiction_queue cq
+            LEFT JOIN memory_log ma ON ma.id = cq.memory_a_id
+            LEFT JOIN memory_log mb ON mb.id = cq.memory_b_id
+            LEFT JOIN projects  pa ON pa.id = ma.project_id
+            LEFT JOIN projects  pb ON pb.id = mb.project_id
+            WHERE cq.created_at >= {cutoff_sql}
+        """
+        contra_params: list[Any] = []
+        if project_id is not None:
+            contra_params.append(project_id)
+            contra_new_query += f" AND (ma.project_id = ${len(contra_params)} OR mb.project_id = ${len(contra_params)})"
+        contra_new_query += " ORDER BY cq.created_at DESC LIMIT 100"
+        new_rows = await conn.fetch(contra_new_query, *contra_params)
+
+        contra_resolved_query = f"""
+            SELECT cq.id, cq.memory_a_id, cq.memory_b_id, cq.resolution_status,
+                   cq.resolution_type, cq.resolved_at, cq.condition_text,
+                   ma.summary AS memory_a_summary, pa.name AS memory_a_project,
+                   mb.summary AS memory_b_summary, pb.name AS memory_b_project
+            FROM contradiction_queue cq
+            LEFT JOIN memory_log ma ON ma.id = cq.memory_a_id
+            LEFT JOIN memory_log mb ON mb.id = cq.memory_b_id
+            LEFT JOIN projects  pa ON pa.id = ma.project_id
+            LEFT JOIN projects  pb ON pb.id = mb.project_id
+            WHERE cq.resolved_at IS NOT NULL AND cq.resolved_at >= {cutoff_sql}
+        """
+        resolved_params: list[Any] = []
+        if project_id is not None:
+            resolved_params.append(project_id)
+            contra_resolved_query += f" AND (ma.project_id = ${len(resolved_params)} OR mb.project_id = ${len(resolved_params)})"
+        contra_resolved_query += " ORDER BY cq.resolved_at DESC LIMIT 100"
+        resolved_rows = await conn.fetch(contra_resolved_query, *resolved_params)
+
+    def _pack(row):
+        data = serialize_row(row) or {}
+        data["memory_a"] = {
+            "id": data.pop("memory_a_id", None),
+            "summary": data.pop("memory_a_summary", None),
+            "project": data.pop("memory_a_project", None),
+        }
+        data["memory_b"] = {
+            "id": data.pop("memory_b_id", None),
+            "summary": data.pop("memory_b_summary", None),
+            "project": data.pop("memory_b_project", None),
+        }
+        return data
+
+    contradictions_new = [_pack(r) for r in new_rows]
+    contradictions_resolved = [_pack(r) for r in resolved_rows]
+
+    return {
+        "window_hours": hours,
+        "project": project,
+        "reflection_runs": runs,
+        "contradictions_new": contradictions_new,
+        "contradictions_resolved": contradictions_resolved,
+        "stats": {
+            "runs": len(runs),
+            "promotions": promotion_total,
+            "new_contradictions": len(contradictions_new),
+            "resolved_contradictions": len(contradictions_resolved),
+        },
+    }
+
+
 async def queue_manual_reflection() -> dict[str, Any]:
     if not pg_pool:
         return {"error": "postgres_unavailable"}
@@ -4345,6 +4499,32 @@ async def list_contradictions(
 
 
 @mcp.tool()
+async def get_brain_activity(hours: int = 24, project: Optional[str] = None) -> str:
+    """Resumen de actividad del cerebro en las últimas N horas: consolidaciones + contradicciones.
+
+    Cuándo usar:
+    - Cuando el usuario pregunte "¿qué ha pasado en mi cerebro hoy?".
+    - Para un informe rápido antes de empezar a trabajar con memoria.
+    - Para auditar cambios tras un ciclo de reflexión.
+
+    Cómo usar:
+    - `hours`: ventana temporal (1..168, default 24).
+    - `project`: opcional, filtra todo al proyecto dado.
+
+    Devuelve:
+    - JSON con `reflection_runs` (con sus promotions), `contradictions_new`,
+      `contradictions_resolved` y `stats` agregadas.
+    - `ERROR ...` si no puede obtenerse la información.
+    """
+    try:
+        payload = await get_brain_activity_payload(hours=hours, project=project)
+        return json.dumps(payload, ensure_ascii=False)
+    except Exception as exc:
+        logger.exception("get_brain_activity fallo")
+        return f"ERROR {exc}"
+
+
+@mcp.tool()
 async def delete_memory(memory_id: str) -> str:
     """Elimina una memoria explícita por su identificador.
 
@@ -4877,6 +5057,11 @@ async def api_list_contradictions(
     if payload.get("error"):
         raise HTTPException(status_code=400, detail=payload["error"])
     return payload
+
+
+@app.get("/api/brain/activity")
+async def api_brain_activity(hours: int = 24, project: Optional[str] = None):
+    return await get_brain_activity_payload(hours=hours, project=project)
 
 
 async def initialize_app_state():

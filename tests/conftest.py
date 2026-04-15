@@ -111,6 +111,12 @@ class BrainClient:
             params["project"] = project
         return self.get("/api/contradictions", params=params)
 
+    def brain_activity(self, hours: int = 24, project: Optional[str] = None):
+        params: dict[str, Any] = {"hours": hours}
+        if project:
+            params["project"] = project
+        return self.get("/api/brain/activity", params=params)
+
     def brain_health(self):
         return self.get("/brain/health")
 
