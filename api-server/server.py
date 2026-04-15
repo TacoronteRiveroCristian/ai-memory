@@ -3275,6 +3275,94 @@ async def list_reflection_runs_payload(
     }
 
 
+async def list_contradictions_payload(
+    status: Optional[str] = None,
+    project: Optional[str] = None,
+    limit: int = 50,
+) -> dict[str, Any]:
+    """Return entries from the contradiction queue with summaries of the memories involved.
+
+    - `status`: filter by `resolution_status` (`pending`, `suspected`, `resolved`).
+      None returns all.
+    - `project`: if provided, only contradictions where EITHER memory belongs to
+      that project are returned. An unknown project yields an empty list.
+    - `limit`: capped to [1, 200].
+    """
+    allowed_status = {"pending", "suspected", "resolved"}
+    if status is not None and status not in allowed_status:
+        return {"contradictions": [], "count": 0, "error": f"invalid status: {status}"}
+    limit = max(1, min(int(limit), 200))
+
+    if not pg_pool:
+        return {"contradictions": [], "count": 0, "filter": {"status": status, "project": project, "limit": limit}}
+
+    async with pg_pool.acquire() as conn:
+        project_id = await _resolve_project_id(conn, project)
+        if project and project_id is None:
+            return {"contradictions": [], "count": 0, "filter": {"status": status, "project": project, "limit": limit}}
+
+        query = """
+            SELECT
+                cq.id,
+                cq.memory_a_id,
+                cq.memory_b_id,
+                cq.resolution_status,
+                cq.resolution_type,
+                cq.resolution_memory_id,
+                cq.condition_text,
+                cq.created_at,
+                cq.resolved_at,
+                ma.summary        AS memory_a_summary,
+                ma.project_id     AS memory_a_project_id,
+                pa.name           AS memory_a_project,
+                mb.summary        AS memory_b_summary,
+                mb.project_id     AS memory_b_project_id,
+                pb.name           AS memory_b_project
+            FROM contradiction_queue cq
+            LEFT JOIN memory_log ma ON ma.id = cq.memory_a_id
+            LEFT JOIN memory_log mb ON mb.id = cq.memory_b_id
+            LEFT JOIN projects  pa ON pa.id = ma.project_id
+            LEFT JOIN projects  pb ON pb.id = mb.project_id
+            WHERE 1=1
+        """
+        params: list[Any] = []
+        if status is not None:
+            params.append(status)
+            query += f" AND cq.resolution_status = ${len(params)}"
+        if project_id is not None:
+            params.append(project_id)
+            query += f" AND (ma.project_id = ${len(params)} OR mb.project_id = ${len(params)})"
+        params.append(limit)
+        query += f" ORDER BY cq.created_at DESC LIMIT ${len(params)}"
+
+        rows = await conn.fetch(query, *params)
+
+    contradictions = []
+    for row in rows:
+        data = serialize_row(row) or {}
+        memory_a = {
+            "id": data.pop("memory_a_id", None),
+            "summary": data.pop("memory_a_summary", None),
+            "project": data.pop("memory_a_project", None),
+        }
+        data.pop("memory_a_project_id", None)
+        memory_b = {
+            "id": data.pop("memory_b_id", None),
+            "summary": data.pop("memory_b_summary", None),
+            "project": data.pop("memory_b_project", None),
+        }
+        data.pop("memory_b_project_id", None)
+        data["memory_a"] = memory_a
+        data["memory_b"] = memory_b
+        contradictions.append(data)
+
+    return {
+        "contradictions": contradictions,
+        "count": len(contradictions),
+        "filter": {"status": status, "project": project, "limit": limit},
+    }
+
+
 async def queue_manual_reflection() -> dict[str, Any]:
     if not pg_pool:
         return {"error": "postgres_unavailable"}
@@ -4224,6 +4312,39 @@ async def list_recent_consolidations(
 
 
 @mcp.tool()
+async def list_contradictions(
+    status: Optional[str] = None,
+    project: Optional[str] = None,
+    limit: int = 20,
+) -> str:
+    """Lista contradicciones detectadas entre memorias, con resumen de cada una.
+
+    Cuándo usar:
+    - Para auditar si el cerebro ha encontrado información incompatible.
+    - Antes de tomar una decisión que dependa de una memoria "confiable".
+    - Cuando el usuario pregunte "¿hay contradicciones pendientes?".
+
+    Cómo usar:
+    - `status`: opcional, uno de `pending`, `suspected`, `resolved`. None devuelve todas.
+    - `project`: opcional, filtra a contradicciones donde cualquiera de las dos
+      memorias pertenece a ese proyecto.
+    - `limit`: número máximo a devolver (1..200, default 20).
+
+    Devuelve:
+    - JSON con lista `contradictions`, cada una con `memory_a` / `memory_b`
+      (id, summary, project), `resolution_status`, `resolution_type`,
+      `condition_text`, `created_at`, `resolved_at`.
+    - `ERROR ...` si no puede obtenerse la información.
+    """
+    try:
+        payload = await list_contradictions_payload(status=status, project=project, limit=limit)
+        return json.dumps(payload, ensure_ascii=False)
+    except Exception as exc:
+        logger.exception("list_contradictions fallo")
+        return f"ERROR {exc}"
+
+
+@mcp.tool()
 async def delete_memory(memory_id: str) -> str:
     """Elimina una memoria explícita por su identificador.
 
@@ -4744,6 +4865,18 @@ async def api_list_reflection_runs(
     return await list_reflection_runs_payload(
         limit=limit, project=project, include_promotions=include_promotions
     )
+
+
+@app.get("/api/contradictions")
+async def api_list_contradictions(
+    status: Optional[str] = None,
+    project: Optional[str] = None,
+    limit: int = 50,
+):
+    payload = await list_contradictions_payload(status=status, project=project, limit=limit)
+    if payload.get("error"):
+        raise HTTPException(status_code=400, detail=payload["error"])
+    return payload
 
 
 async def initialize_app_state():

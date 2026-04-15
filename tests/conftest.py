@@ -102,6 +102,15 @@ class BrainClient:
             params["project"] = project
         return self.get("/api/reflections/runs", params=params)
 
+    def list_contradictions(self, status: Optional[str] = None,
+                            project: Optional[str] = None, limit: int = 50):
+        params: dict[str, Any] = {"limit": limit}
+        if status:
+            params["status"] = status
+        if project:
+            params["project"] = project
+        return self.get("/api/contradictions", params=params)
+
     def brain_health(self):
         return self.get("/brain/health")
 
