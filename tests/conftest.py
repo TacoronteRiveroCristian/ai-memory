@@ -95,6 +95,13 @@ class BrainClient:
     def reflection_status(self):
         return self.get("/api/reflections/status")
 
+    def list_reflection_runs(self, limit: int = 20, project: Optional[str] = None,
+                             include_promotions: bool = True):
+        params: dict[str, Any] = {"limit": limit, "include_promotions": str(include_promotions).lower()}
+        if project:
+            params["project"] = project
+        return self.get("/api/reflections/runs", params=params)
+
     def brain_health(self):
         return self.get("/brain/health")
 

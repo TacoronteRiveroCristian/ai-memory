@@ -3194,6 +3194,87 @@ async def get_reflection_status_payload() -> dict[str, Any]:
     }
 
 
+async def list_reflection_runs_payload(
+    limit: int = 20,
+    project: Optional[str] = None,
+    include_promotions: bool = True,
+) -> dict[str, Any]:
+    """Return the most recent reflection runs and (optionally) their promotions.
+
+    - `limit`: capped to [1, 100].
+    - `project`: if provided, only runs that produced at least one promotion for
+      that project are returned. An unknown project yields an empty list.
+    - `include_promotions`: when True, each run carries its promotions list.
+    """
+    limit = max(1, min(int(limit), 100))
+    if not pg_pool:
+        return {"runs": [], "count": 0, "filter": {"project": project, "limit": limit}}
+
+    async with pg_pool.acquire() as conn:
+        project_id = await _resolve_project_id(conn, project)
+        if project and project_id is None:
+            return {"runs": [], "count": 0, "filter": {"project": project, "limit": limit}}
+
+        if project_id is None:
+            run_rows = await conn.fetch(
+                """
+                SELECT id, mode, status, model, input_count, promoted_count,
+                       error, started_at, finished_at
+                FROM reflection_runs
+                ORDER BY started_at DESC
+                LIMIT $1
+                """,
+                limit,
+            )
+        else:
+            run_rows = await conn.fetch(
+                """
+                SELECT DISTINCT r.id, r.mode, r.status, r.model, r.input_count,
+                       r.promoted_count, r.error, r.started_at, r.finished_at
+                FROM reflection_runs r
+                JOIN reflection_promotions p ON p.run_id = r.id
+                WHERE p.project_id = $1
+                ORDER BY r.started_at DESC
+                LIMIT $2
+                """,
+                project_id,
+                limit,
+            )
+
+        runs = [serialize_row(r) for r in run_rows]
+
+        if include_promotions and runs:
+            run_ids = [uuid.UUID(r["id"]) for r in runs]
+            promo_query = """
+                SELECT rp.id, rp.run_id, rp.item_type, rp.item_hash,
+                       rp.target_ref, rp.created_at, p.name AS project
+                FROM reflection_promotions rp
+                LEFT JOIN projects p ON p.id = rp.project_id
+                WHERE rp.run_id = ANY($1::uuid[])
+            """
+            params: list[Any] = [run_ids]
+            if project_id is not None:
+                promo_query += " AND rp.project_id = $2"
+                params.append(project_id)
+            promo_query += " ORDER BY rp.created_at ASC"
+            promo_rows = await conn.fetch(promo_query, *params)
+
+            by_run: dict[str, list[dict[str, Any]]] = {r["id"]: [] for r in runs}
+            for row in promo_rows:
+                serialized = serialize_row(row) or {}
+                run_key = serialized.pop("run_id", None)
+                if run_key in by_run:
+                    by_run[run_key].append(serialized)
+            for run in runs:
+                run["promotions"] = by_run.get(run["id"], [])
+
+    return {
+        "runs": runs,
+        "count": len(runs),
+        "filter": {"project": project, "limit": limit, "include_promotions": include_promotions},
+    }
+
+
 async def queue_manual_reflection() -> dict[str, Any]:
     if not pg_pool:
         return {"error": "postgres_unavailable"}
@@ -4112,6 +4193,37 @@ async def get_reflection_status() -> str:
 
 
 @mcp.tool()
+async def list_recent_consolidations(
+    limit: int = 10,
+    project: Optional[str] = None,
+) -> str:
+    """Lista las últimas ejecuciones del worker de reflexión y qué se consolidó en cada una.
+
+    Cuándo usar:
+    - Cuando quieras saber qué ha pasado en el cerebro en las últimas horas.
+    - Para auditar qué decisiones/errores/tareas/memorias fueron promovidas.
+    - Antes de tomar decisiones que dependan de "qué recordaba el sistema".
+
+    Cómo usar:
+    - `limit`: número máximo de runs a devolver (1..100, default 10).
+    - `project`: opcional, filtra a runs que promovieron algo en ese proyecto.
+
+    Devuelve:
+    - JSON con lista `runs`, cada uno con sus `promotions` (item_type, item_hash,
+      target_ref, project, created_at).
+    - `ERROR ...` si no puede obtenerse la información.
+    """
+    try:
+        payload = await list_reflection_runs_payload(
+            limit=limit, project=project, include_promotions=True
+        )
+        return json.dumps(payload, ensure_ascii=False)
+    except Exception as exc:
+        logger.exception("list_recent_consolidations fallo")
+        return f"ERROR {exc}"
+
+
+@mcp.tool()
 async def delete_memory(memory_id: str) -> str:
     """Elimina una memoria explícita por su identificador.
 
@@ -4621,6 +4733,17 @@ async def api_run_reflection():
 @app.get("/api/reflections/status")
 async def api_reflection_status():
     return await get_reflection_status_payload()
+
+
+@app.get("/api/reflections/runs")
+async def api_list_reflection_runs(
+    limit: int = 20,
+    project: Optional[str] = None,
+    include_promotions: bool = True,
+):
+    return await list_reflection_runs_payload(
+        limit=limit, project=project, include_promotions=include_promotions
+    )
 
 
 async def initialize_app_state():
