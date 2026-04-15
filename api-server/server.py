@@ -533,6 +533,18 @@ def serialize_row(row: Optional[asyncpg.Record]) -> Optional[dict[str, Any]]:
     return result
 
 
+async def _resolve_project_id(conn, project: Optional[str]) -> Optional[uuid.UUID]:
+    """Lookup a project UUID by name. Returns None if project is None or not found.
+
+    Callers should treat a None return for a non-None input as 'no such project'
+    and short-circuit to an empty result set rather than erroring.
+    """
+    if not project:
+        return None
+    row = await conn.fetchrow("SELECT id FROM projects WHERE name = $1 LIMIT 1", project)
+    return row["id"] if row else None
+
+
 def clamp01(value: float) -> float:
     return max(0.0, min(1.0, value))
 
