@@ -105,6 +105,16 @@ These terms appear throughout the codebase:
 - **Novelty score**: how novel a memory is relative to existing knowledge
 - **Schema extraction**: abstract patterns detected across multiple concrete memories
 
+## Observability
+
+Three MCP tools / REST endpoints expose what the reflection worker has done:
+
+- `list_recent_consolidations` → `GET /api/reflections/runs` — recent runs + what each promoted
+- `list_contradictions` → `GET /api/contradictions` — detected conflicts (pending/suspected/resolved)
+- `get_brain_activity` → `GET /api/brain/activity` — combined last-N-hours timeline
+
+Use these to answer "¿qué se consolidó?" / "¿hay contradicciones?" without touching Postgres directly.
+
 ## Serena MCP — Semantic Code Tools
 
 This project has the **Serena MCP server** connected, which provides semantic understanding of the codebase (Python, TypeScript). Use it as the primary way to navigate and edit code.
