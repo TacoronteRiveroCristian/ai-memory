@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-04-15
+
+### Added
+- **Reflection observability API** (`api-server/server.py`) — three new REST endpoints + matching MCP tools that expose what the reflection worker has consolidated, skipped, or flagged as contradictory, without requiring direct Postgres access:
+  - `GET /api/reflections/runs` / `list_recent_consolidations` — recent reflection runs with their promotions (item_type, target_ref, project). Supports `limit` (1..100) and `project` filters.
+  - `GET /api/contradictions` / `list_contradictions` — contradiction queue entries with both memory sides resolved, filterable by `status` (`pending` / `suspected` / `resolved`) and `project`.
+  - `GET /api/brain/activity` / `get_brain_activity` — combined last-N-hours timeline of runs + contradictions for at-a-glance brain activity. `hours` clamped to [1, 168].
+- **`_resolve_project_id(conn, project)` helper** — shared lookup used by the new observability endpoints; takes an existing asyncpg connection so compound queries run in a single transaction.
+- **`tests/test_reflection_observability.py`** — 11 tests covering smoke, filters, limit clamping, unknown-project empty semantics, bad-status 400, and (in live mode) surfacing of suspected contradiction pairs.
+- **`CLAUDE.md` Observability section** — documents the three new MCP tools / endpoints as the canonical way to answer "¿qué se consolidó?" / "¿hay contradicciones?".
+
+### Notes
+- End-to-end verified in live mode: a synthetic `record_session_summary` followed by a manual `run_memory_reflection` produced 6 real promotions (5 durable_memory including one dedupe SKIP, 1 decision), all visible via `list_recent_consolidations` with full `target_ref` detail.
+
 ## 2026-04-14
 
 ### Added
