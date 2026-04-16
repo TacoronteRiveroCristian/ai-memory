@@ -149,3 +149,50 @@ This project has the **Serena MCP server** connected, which provides semantic un
 | project_context | ≤ 2500ms |
 | plasticity_session | ≤ 1500ms |
 | graph_subgraph | ≤ 900ms |
+
+## AI Memory Brain
+
+Este proyecto usa **AI Memory Brain** como sistema de memoria persistente entre sesiones.
+
+### Nombre del proyecto en el cerebro
+
+Usa siempre `ai-memory` como valor de `project` en todas las llamadas MCP.
+
+### Al iniciar sesion
+
+Llama a `get_project_context(project_name="ai-memory")` para cargar:
+- Memorias relevantes del proyecto
+- Tareas activas
+- Decisiones recientes
+- Working memory
+
+Lee lo que devuelve antes de trabajar. No dupliques lo que ya existe.
+
+### Mientras trabajas
+
+Guarda proactivamente cuando ocurra algo relevante:
+
+| Evento | Tool | Importancia |
+|--------|------|-------------|
+| Decision de arquitectura | `store_decision(project="ai-memory", ...)` | 0.85 |
+| Bug encontrado o resuelto | `store_error(project="ai-memory", ...)` | 0.7-0.85 |
+| Patron o insight | `store_memory(project="ai-memory", ...)` | 0.7 |
+| Tarea cambia de estado | `update_task_state(project="ai-memory", ...)` | 0.5-0.7 |
+| Conexion con otro proyecto | `bridge_projects(project="ai-memory", ...)` | 0.7 |
+
+### Al cerrar sesion
+
+Llama a `record_session_summary(project="ai-memory", agent_id="claude-code")` con un resumen de lo que se hizo.
+
+### Formato de memorias
+
+- **content**: QUE paso + POR QUE importa + CONTEXTO (parrafo autocontenido)
+- **tags**: jerarquicos, separados por coma (ej: `backend/api, bug/resolved`)
+- **importance**: 0.5 rutina | 0.7 notable | 0.85 importante | 0.95 critico
+
+### NO guardar
+
+- Resumenes de conversacion (eso lo hace `record_session_summary`)
+- Hechos que se pueden ver en el codigo o en git
+- Info temporal de debug
+- Decisiones triviales
