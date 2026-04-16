@@ -162,28 +162,36 @@ make stack-up          # docker compose up -d --build
 make health
 ```
 
-### Conectar un agente via MCP
+### Conectar Claude Code (plugin automatico)
 
-En `.mcp.json` de tu agente (ej. Claude Code):
+El plugin instala todo lo necesario a nivel de usuario: MCP server, hooks, protocolo. Funciona en **todos tus proyectos** sin configurar nada mas.
+
+```bash
+# Desde la raiz del proyecto ai-memory:
+./plugin/claude-code/install.sh http://<IP-DEL-CEREBRO>:8050 <TU_MEMORY_API_KEY>
+
+# Ejemplo:
+./plugin/claude-code/install.sh http://192.168.1.156:8050 mi-clave-secreta
+```
+
+Despues abre Claude Code en cualquier proyecto y `memoryBrain` estara conectado. Ver [`plugin/claude-code/README.md`](plugin/claude-code/README.md) para detalles y configuracion manual.
+
+### Conectar otros clientes MCP
+
+Para Cline, custom agents u otros clientes MCP, anade a tu `.mcp.json`:
 
 ```json
 {
   "mcpServers": {
     "memoryBrain": {
-      "type": "sse",
-      "url": "http://localhost:8050/mcp",
+      "type": "http",
+      "url": "http://<IP>:8050/mcp",
       "headers": {
-        "X-API-Key": "${MEMORY_API_KEY}"
+        "X-API-Key": "<TU_MEMORY_API_KEY>"
       }
     }
   }
 }
-```
-
-Para Claude Code, carga la variable de entorno antes de iniciar:
-
-```bash
-source .env && claude
 ```
 
 ### Ver la UI del cerebro

@@ -1,18 +1,5 @@
 {
   "enabledPlugins": {
     "critical-reviewer@claude-plugins-official": true
-  },
-  "hooks": {
-    "Stop": [
-      {
-        "matcher": "*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": ".claude/hooks/ingest-turn.sh"
-          }
-        ]
-      }
-    ]
   }
 }
