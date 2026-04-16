@@ -20,3 +20,5 @@ brain-ui/dist/
 .superpowers/
 .playwright-mcp
 .mcp.json
+.claude/worktrees/
+.claude/scheduled_tasks.lock
